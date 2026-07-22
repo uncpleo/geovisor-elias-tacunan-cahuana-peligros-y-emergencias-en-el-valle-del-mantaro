@@ -98,13 +98,16 @@ export function mapReport(row: any): Report {
   }
 
   // Map DB nivel_gravedad -> UI SeverityLevel
+  const rawSev = String(row.nivel_gravedad || '').toLowerCase().trim();
   let severity: SeverityLevel = 'medio';
-  if (row.nivel_gravedad === 'Baja') {
+  if (rawSev.includes('baj')) {
     severity = 'bajo';
-  } else if (row.nivel_gravedad === 'Alta') {
+  } else if (rawSev.includes('alt')) {
     severity = 'alto';
-  } else if (row.nivel_gravedad === 'Critica') {
+  } else if (rawSev.includes('crit') || rawSev.includes('crít')) {
     severity = 'critico';
+  } else if (rawSev.includes('med')) {
+    severity = 'medio';
   }
 
   return {

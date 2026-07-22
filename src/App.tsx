@@ -1195,11 +1195,7 @@ export default function App() {
     // -------------------------------------------------------------
     // CAPAS DINÁMICAS (Capa 3: Daño Físico, Capa 4: Daño Humano, Capa 5: Necesidades)
     // -------------------------------------------------------------
-    reports.forEach((report) => {
-      // Filtrar por Severidad si hay filtro activo
-      if (severityFilter !== 'todos' && report.severity !== severityFilter) {
-        return;
-      }
+    filteredReports.forEach((report) => {
 
       let isVisible = false;
       let iconColorClass = 'bg-orange-500';
@@ -1371,6 +1367,11 @@ export default function App() {
       showToast('Coordenadas inválidas. Rango aproximado de Perú: Lat: [-18 a -1], Lng: [-82 a -68]', 'error');
     }
   };
+
+  // --- REPORTE Y FILTRADO POR SEVERIDAD ---
+  const filteredReports = severityFilter === 'todos' 
+    ? reports 
+    : reports.filter(r => r.severity === severityFilter);
 
   // --- CÁLCULO DE ESTADÍSTICAS RÁPIDAS ---
   const stats = {
@@ -1699,19 +1700,42 @@ export default function App() {
 
           {/* FILTRO DE SEVERIDAD RÁPIDO */}
           <div className="bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60">
-            <span className="text-xs font-bold text-slate-700 block mb-2">Filtro de Gravedad del Impacto</span>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-slate-700">Filtro de Gravedad del Impacto</span>
+              {severityFilter !== 'todos' && (
+                <button 
+                  onClick={() => setSeverityFilter('todos')}
+                  className="text-[10px] text-slate-500 hover:text-slate-900 underline cursor-pointer"
+                >
+                  Ver todos
+                </button>
+              )}
+            </div>
             <div className="flex flex-wrap gap-1">
-              {['todos', 'critico', 'alto', 'medio', 'bajo'].map((sev) => (
+              {[
+                { id: 'todos', label: 'Todos', count: reports.length },
+                { id: 'critico', label: 'Crítico', count: reports.filter(r => r.severity === 'critico').length },
+                { id: 'alto', label: 'Alto', count: reports.filter(r => r.severity === 'alto').length },
+                { id: 'medio', label: 'Medio', count: reports.filter(r => r.severity === 'medio').length },
+                { id: 'bajo', label: 'Bajo', count: reports.filter(r => r.severity === 'bajo').length }
+              ].map((item) => (
                 <button
-                  key={sev}
-                  onClick={() => setSeverityFilter(sev)}
-                  className={`px-2.5 py-1 rounded-xl text-[11px] font-medium capitalize border transition-all cursor-pointer ${
-                    severityFilter === sev 
-                      ? 'bg-slate-900 border-slate-900 text-white shadow-sm' 
+                  key={item.id}
+                  onClick={() => setSeverityFilter(item.id)}
+                  className={`px-2.5 py-1 rounded-xl text-[11px] font-medium capitalize border transition-all cursor-pointer flex items-center gap-1.5 ${
+                    severityFilter === item.id 
+                      ? 'bg-slate-900 border-slate-900 text-white shadow-sm font-bold' 
                       : 'bg-white border-slate-200 text-slate-600 hover:border-slate-350 hover:text-slate-900 shadow-sm'
                   }`}
                 >
-                  {sev === 'todos' ? 'Todos' : sev}
+                  <span>{item.label}</span>
+                  <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                    severityFilter === item.id
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    {item.count}
+                  </span>
                 </button>
               ))}
             </div>
@@ -1721,51 +1745,59 @@ export default function App() {
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-700">Puntos Críticos de Campo</span>
-              <span className="text-[10px] text-slate-400 font-mono">Mostrando {reports.length}</span>
+              <span className="text-[10px] text-slate-400 font-mono">
+                {severityFilter === 'todos' ? `Mostrando ${reports.length}` : `Mostrando ${filteredReports.length} de ${reports.length}`}
+              </span>
             </div>
             
             <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-              {reports.map((report) => (
-                <div
-                  key={report.id}
-                  onClick={() => {
-                    setSelectedReport(report);
-                    setIsEditingReport(false);
-                    setIsCreatingReport(false);
-                    setClickCoords(null);
-                    handleFocusOnMap(report.lat, report.lng);
-                  }}
-                  className={`p-2.5 rounded-xl text-left border cursor-pointer transition-all ${
-                    selectedReport?.id === report.id
-                      ? 'bg-slate-50/90 border-slate-400/80 shadow-md scale-[0.99]'
-                      : 'bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300 shadow-sm'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase border ${
-                      report.type === 'damage_physical' ? 'bg-orange-50 border-orange-200/40 text-orange-700' :
-                      report.type === 'damage_human' ? 'bg-red-50 border-red-200/40 text-red-700' : 
-                      report.type === 'shelter_hub' ? 'bg-emerald-50 border-emerald-200/40 text-emerald-750' : 'bg-amber-50 border-amber-200/40 text-amber-700'
-                    }`}>
-                      {report.type === 'damage_physical' ? 'Físico' : 
-                       report.type === 'damage_human' ? 'Salud' : 
-                       report.type === 'shelter_hub' ? 'Acopio' : 'Urgencia'}
-                    </span>
-                    <span className={`text-[8px] font-mono font-bold px-1.5 py-0.2 rounded uppercase ${
-                      report.severity === 'critico' ? 'bg-red-500 text-white' :
-                      report.severity === 'alto' ? 'bg-orange-500 text-white' :
-                      report.severity === 'medio' ? 'bg-amber-500 text-white' : 'bg-slate-100 border border-slate-200 text-slate-700'
-                    }`}>
-                      {report.severity}
-                    </span>
-                  </div>
-                  <h5 className="text-xs font-semibold text-slate-900 truncate">{report.title}</h5>
-                  <div className="flex items-center justify-between text-[9px] text-slate-400 mt-1">
-                    <span className="font-medium text-slate-500">{report.createdBy}</span>
-                    <span className="font-mono">Lat: {report.lat.toFixed(3)}</span>
-                  </div>
+              {filteredReports.length === 0 ? (
+                <div className="p-3 text-center bg-white border border-dashed border-slate-200 rounded-xl">
+                  <p className="text-[11px] text-slate-500 font-medium">No hay reportes con gravedad "{severityFilter}".</p>
                 </div>
-              ))}
+              ) : (
+                filteredReports.map((report) => (
+                  <div
+                    key={report.id}
+                    onClick={() => {
+                      setSelectedReport(report);
+                      setIsEditingReport(false);
+                      setIsCreatingReport(false);
+                      setClickCoords(null);
+                      handleFocusOnMap(report.lat, report.lng);
+                    }}
+                    className={`p-2.5 rounded-xl text-left border cursor-pointer transition-all ${
+                      selectedReport?.id === report.id
+                        ? 'bg-slate-50/90 border-slate-400/80 shadow-md scale-[0.99]'
+                        : 'bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300 shadow-sm'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase border ${
+                        report.type === 'damage_physical' ? 'bg-orange-50 border-orange-200/40 text-orange-700' :
+                        report.type === 'damage_human' ? 'bg-red-50 border-red-200/40 text-red-700' : 
+                        report.type === 'shelter_hub' ? 'bg-emerald-50 border-emerald-200/40 text-emerald-750' : 'bg-amber-50 border-amber-200/40 text-amber-700'
+                      }`}>
+                        {report.type === 'damage_physical' ? 'Físico' : 
+                         report.type === 'damage_human' ? 'Salud' : 
+                         report.type === 'shelter_hub' ? 'Acopio' : 'Urgencia'}
+                      </span>
+                      <span className={`text-[8px] font-mono font-bold px-1.5 py-0.2 rounded uppercase ${
+                        report.severity === 'critico' ? 'bg-red-500 text-white' :
+                        report.severity === 'alto' ? 'bg-orange-500 text-white' :
+                        report.severity === 'medio' ? 'bg-amber-500 text-white' : 'bg-slate-100 border border-slate-200 text-slate-700'
+                      }`}>
+                        {report.severity}
+                      </span>
+                    </div>
+                    <h5 className="text-xs font-semibold text-slate-900 truncate">{report.title}</h5>
+                    <div className="flex items-center justify-between text-[9px] text-slate-400 mt-1">
+                      <span className="font-medium text-slate-500">{report.createdBy}</span>
+                      <span className="font-mono">Lat: {report.lat.toFixed(3)}</span>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
