@@ -1,0 +1,68 @@
+{
+  "entities": {
+    "Report": {
+      "title": "Report",
+      "description": "Geolocated damage, human impact, or necessity report in Chupaca, Junín",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the report"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["damage_physical", "damage_human", "need_urgency"],
+          "description": "The category of report corresponding to layers 3, 4, or 5"
+        },
+        "subType": {
+          "type": "string",
+          "description": "Sub-category (e.g. vivienda_colapsada, via_bloqueada, herido, agua, carpas)"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Short summary of the damage or need"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Detailed description of the current situation"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["bajo", "medio", "alto", "critico"],
+          "description": "Gravity of the damage or urgency"
+        },
+        "lat": {
+          "type": "number",
+          "description": "Latitude coordinate"
+        },
+        "lng": {
+          "type": "number",
+          "description": "Longitude coordinate"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the report was submitted"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the last update"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the administrator who registered the report"
+        }
+      },
+      "required": ["id", "type", "subType", "title", "description", "severity", "lat", "lng", "createdAt", "updatedAt", "createdBy"]
+    }
+  },
+  "firestore": {
+    "reports/{reportId}": {
+      "schema": "Report",
+      "description": "Collection of all dynamic disaster reports in the Junín earthquake area"
+    }
+  }
+}

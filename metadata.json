@@ -1,0 +1,10 @@
+{
+  "name": "Remix: GEOVISOR ELIAS TACUNAN CAHUANA PELIGROS Y EMERGENCIAS EN EL VALLE DEL MANTARO",
+  "description": "Geovisor web interactivo para la gestión, delimitación distrital con WMS de INEI y visualización de peligros y emergencias en el Valle del Mantaro, Junín.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
