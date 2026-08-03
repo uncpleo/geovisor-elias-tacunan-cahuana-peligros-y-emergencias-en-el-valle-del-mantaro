@@ -40,8 +40,10 @@ import {
   mapSolicitud,
   uiTypeToDb,
   uiSeverityToDb,
-  parseGeometry
+  parseGeometry,
+  fetchCartographicLayer
 } from './supabaseClient';
+import { ImageGallery } from './components/ImageGallery';
 
 // Password para acceder al panel de administración de respaldo
 const ADMIN_PASSWORD = 'chupaca2026';
@@ -89,8 +91,9 @@ export default function App() {
     }
   }, [isSidebarOpenMobile]);
 
-  // Nivel de la capa WMS del INEI ('3' = Distritos, '2' = Provincias, '1' = Departamentos)
-  const [wmsLayerLevel, setWmsLayerLevel] = useState<'3' | '2' | '1'>('3');
+  // Nivel de la capa cartográfica del GIS ('3' = Distritos, '2' = Provincias, '1' = Departamentos, 'auto' = Dinámico según zoom)
+  const [wmsLayerLevel, setWmsLayerLevel] = useState<'3' | '2' | '1' | 'auto'>('3');
+  const [currentZoom, setCurrentZoom] = useState<number>(11);
 
   // Control de Capas de abajo hacia arriba (True = Visible, False = Oculto)
   const [visibleLayers, setVisibleLayers] = useState({
@@ -109,6 +112,11 @@ export default function App() {
 
   // Filtro de severidad activo para visualización rápida
   const [severityFilter, setSeverityFilter] = useState<string>('todos');
+  // Filtro de estado de atención activo
+  const [statusFilter, setStatusFilter] = useState<string>('todos');
+
+  // Estado para desplegar/colapsar el menú Jerarquía de Capas (GIS Layer Stack)
+  const [isLayerStackOpen, setIsLayerStackOpen] = useState<boolean>(true);
 
   // Estado para creación de reporte (formulario dinámico)
   const [isCreatingReport, setIsCreatingReport] = useState(false);
@@ -122,6 +130,7 @@ export default function App() {
     createdBy: string;
     distrito: string;
     provincia: string;
+    status: string;
   }>({
     type: 'damage_physical',
     subType: 'vivienda_colapsada',
@@ -130,7 +139,8 @@ export default function App() {
     severity: 'alto',
     createdBy: 'Público General',
     distrito: '',
-    provincia: ''
+    provincia: '',
+    status: 'Pendiente'
   });
 
   // Estado para edición o visualización detallada de un reporte existente
@@ -271,6 +281,7 @@ export default function App() {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const layersGroupRef = useRef<L.FeatureGroup | null>(null);
+  const cartoLayerGroupRef = useRef<L.FeatureGroup | null>(null);
   const centrosPobladosGroupRef = useRef<L.FeatureGroup | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
 
@@ -563,7 +574,8 @@ export default function App() {
           severity: 'alto',
           createdBy: 'Público General',
           distrito: 'Chupaca',
-          provincia: 'Chupaca'
+          provincia: 'Chupaca',
+          status: 'Pendiente'
         });
       } catch (err: any) {
         console.error('Error enviando solicitud a Supabase:', err);
@@ -587,7 +599,7 @@ export default function App() {
             descripcion_detallada: newReport.description,
             contacto_telefono: null,
             nivel_gravedad: uiSeverityToDb(newReport.severity),
-            estado_atencion: 'Pendiente',
+            estado_atencion: newReport.status || 'Pendiente',
             brigadista_institucion: newReport.createdBy || 'COER Junín',
             ubicacion: `POINT(${lngVal} ${latVal})`
           }
@@ -612,7 +624,8 @@ export default function App() {
           lng: lngVal,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          createdBy: newReport.createdBy || 'COER Junín'
+          createdBy: newReport.createdBy || 'COER Junín',
+          status: newReport.status || 'Pendiente'
         };
       }
 
@@ -627,7 +640,8 @@ export default function App() {
         severity: 'alto',
         createdBy: 'COER Junín',
         distrito: 'Chupaca',
-        provincia: 'Chupaca'
+        provincia: 'Chupaca',
+        status: 'Pendiente'
       });
       showToast('Reporte guardado con éxito y sincronizado con Supabase.', 'success');
     } catch (err: any) {
@@ -644,7 +658,8 @@ export default function App() {
         lng: lngVal,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        createdBy: newReport.createdBy || 'COER Junín'
+        createdBy: newReport.createdBy || 'COER Junín',
+        status: newReport.status || 'Pendiente'
       };
       setReports(prev => [fallbackReport, ...prev]);
       setIsCreatingReport(false);
@@ -657,7 +672,8 @@ export default function App() {
         severity: 'alto',
         createdBy: 'COER Junín',
         distrito: 'Chupaca',
-        provincia: 'Chupaca'
+        provincia: 'Chupaca',
+        status: 'Pendiente'
       });
       showToast('Reporte guardado localmente (Sin conexión a Supabase).', 'info');
     } finally {
@@ -829,6 +845,11 @@ export default function App() {
 
      // L.control.layers(baseMaps, overlayMaps, { position: 'topright', collapsed: false }).addTo(map);
 
+      // Escuchar cambios de zoom para actualización dinámica de capas (Auto Mode)
+      map.on('zoomend', () => {
+        setCurrentZoom(map.getZoom());
+      });
+
       // Sincronizar cambios de base map desde el control nativo hacia el estado de React
       map.on('baselayerchange', (e: any) => {
         if (e.name === "Google Satélite (Híbrido)") {
@@ -841,6 +862,7 @@ export default function App() {
       });
 
       mapRef.current = map;
+      cartoLayerGroupRef.current = L.featureGroup().addTo(map);
       layersGroupRef.current = L.featureGroup().addTo(map);
       centrosPobladosGroupRef.current = L.featureGroup().addTo(map);
     }
@@ -1094,28 +1116,143 @@ export default function App() {
     };
   }, [activeRole]);
 
-  // --- COMPILAR Y RENDERIZAR CAPAS SEGÚN EL ORDEN ESTRICTO (1 a 5) ---
+  // --- REPORTE Y FILTRADO POR SEVERIDAD Y ESTADO DE ATENCIÓN ---
+  const filteredReports = reports.filter(r => {
+    const matchSeverity = severityFilter === 'todos' || r.severity === severityFilter;
+    const matchStatus = statusFilter === 'todos' || (r.status || 'Pendiente') === statusFilter;
+    return matchSeverity && matchStatus;
+  });
+
+  // --- COMPILAR Y RENDERIZAR CAPA 1: DELIMITACIÓN CARTOGRÁFICA (SUPABASE GIS / WMS INEI) ---
+  useEffect(() => {
+    let isCancelled = false;
+    const map = mapRef.current;
+    const group = cartoLayerGroupRef.current;
+    if (!map || !group) return;
+
+    const renderCartoLayer = async () => {
+      group.clearLayers();
+
+      if (!visibleLayers.capa1) return;
+
+      let effectiveLevel: '1' | '2' | '3' = '3';
+      if (wmsLayerLevel === 'auto') {
+        const zoom = currentZoom;
+        if (zoom < 7.0) effectiveLevel = '1';
+        else if (zoom <= 9.5) effectiveLevel = '2';
+        else effectiveLevel = '3';
+      } else {
+        effectiveLevel = wmsLayerLevel as '1' | '2' | '3';
+      }
+
+      const cartoResult = await fetchCartographicLayer(effectiveLevel);
+      if (isCancelled) return;
+
+      if (cartoResult && cartoResult.geoJson && cartoResult.geoJson.features.length > 0) {
+        const geoLayer = L.geoJSON(cartoResult.geoJson as any, {
+          style: {
+            color: '#0d9488',
+            weight: 2,
+            opacity: 0.9,
+            fillColor: '#14b8a6',
+            fillOpacity: 0.12
+          },
+          onEachFeature: (feature, layer) => {
+            const props = feature.properties || {};
+            let popupHtml = '';
+
+            if (cartoResult.tableName === 'distritos') {
+              popupHtml = `
+                <div class="p-2.5 font-sans max-w-[220px]">
+                  <div class="border-b border-teal-200 pb-1 mb-1 bg-teal-50 px-1.5 py-0.5 rounded flex items-center justify-between">
+                    <span class="text-[9px] font-bold text-teal-800 uppercase font-mono">📍 Distrito (Supabase GIS)</span>
+                  </div>
+                  <h4 class="font-bold text-slate-900 text-xs m-0 mb-1">${props.distrito || 'Sin Nombre'}</h4>
+                  <div class="space-y-0.5 text-[11px] text-slate-600 leading-tight">
+                    <p><strong>Capital:</strong> ${props.capital || '-'}</p>
+                    <p><strong>Ubigeo:</strong> <code class="bg-slate-100 px-1 py-0.2 rounded font-mono text-[10px] text-teal-700">${props.ubigeo || '-'}</code></p>
+                    <p><strong>Cód. Prov. Full:</strong> ${props.codprov_full || '-'}</p>
+                    <p><strong>Cód. Dist:</strong> ${props.coddist || '-'}</p>
+                  </div>
+                </div>
+              `;
+            } else if (cartoResult.tableName === 'provincias') {
+              popupHtml = `
+                <div class="p-2.5 font-sans max-w-[220px]">
+                  <div class="border-b border-teal-200 pb-1 mb-1 bg-teal-50 px-1.5 py-0.5 rounded flex items-center justify-between">
+                    <span class="text-[9px] font-bold text-teal-800 uppercase font-mono">🗺️ Provincia (Supabase GIS)</span>
+                  </div>
+                  <h4 class="font-bold text-slate-900 text-xs m-0 mb-1">${props.provincia || 'Sin Nombre'}</h4>
+                  <div class="space-y-0.5 text-[11px] text-slate-600 leading-tight">
+                    <p><strong>Capital:</strong> ${props.capital || '-'}</p>
+                    <p><strong>Cód. Prov. Full:</strong> <code class="bg-slate-100 px-1 py-0.2 rounded font-mono text-[10px] text-teal-700">${props.codprov_full || '-'}</code></p>
+                    <p><strong>Cód. Dep:</strong> ${props.coddep || '-'}</p>
+                  </div>
+                </div>
+              `;
+            } else {
+              popupHtml = `
+                <div class="p-2.5 font-sans max-w-[220px]">
+                  <div class="border-b border-teal-200 pb-1 mb-1 bg-teal-50 px-1.5 py-0.5 rounded flex items-center justify-between">
+                    <span class="text-[9px] font-bold text-teal-800 uppercase font-mono">🏛️ Departamento (Supabase GIS)</span>
+                  </div>
+                  <h4 class="font-bold text-slate-900 text-xs m-0 mb-1">${props.departamento || 'Sin Nombre'}</h4>
+                  <div class="space-y-0.5 text-[11px] text-slate-600 leading-tight">
+                    <p><strong>Cód. Depto:</strong> <code class="bg-slate-100 px-1 py-0.2 rounded font-mono text-[10px] text-teal-700">${props.coddep || '-'}</code></p>
+                  </div>
+                </div>
+              `;
+            }
+
+            layer.bindPopup(popupHtml);
+
+            layer.on({
+              mouseover: (e) => {
+                const l = e.target;
+                l.setStyle({
+                  weight: 3.5,
+                  color: '#0f766e',
+                  fillOpacity: 0.35
+                });
+                if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) {
+                  l.bringToFront();
+                }
+              },
+              mouseout: (e) => {
+                geoLayer.resetStyle(e.target);
+              }
+            });
+          }
+        });
+        group.addLayer(geoLayer);
+      } else {
+        // Fallback WMS INEI si la tabla en Supabase no contiene registros
+        const wmsLayer = L.tileLayer.wms('https://geoservicios.inei.gob.pe/arcgis/services/Censos2017/MapServer/WMSServer', {
+          layers: effectiveLevel,
+          format: 'image/png',
+          transparent: true,
+          version: '1.3.0',
+          attribution: '&copy; INEI Delimitación Distrital WMS &copy; CAPCORP'
+        });
+        group.addLayer(wmsLayer);
+      }
+    };
+
+    renderCartoLayer();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [visibleLayers.capa1, wmsLayerLevel, currentZoom]);
+
+  // --- COMPILAR Y RENDERIZAR MARCADORES Y CAPAS TEMÁTICAS (Capas 2 a 7) ---
   useEffect(() => {
     const map = mapRef.current;
     const group = layersGroupRef.current;
     if (!map || !group) return;
 
-    // Limpiar todas las capas previas para evitar duplicidad y mantener orden jerárquico estricto
+    // Limpiar únicamente las capas de marcadores
     group.clearLayers();
-
-    // -------------------------------------------------------------
-    // CAPA 1: Delimitación Distrital de Junín (WMS Oficial INEI)
-    // -------------------------------------------------------------
-    if (visibleLayers.capa1) {
-      const wmsLayer = L.tileLayer.wms('https://geoservicios.inei.gob.pe/arcgis/services/Censos2017/MapServer/WMSServer', {
-        layers: wmsLayerLevel, // '3' = Distrital, '2' = Provincial, '1' = Departamental
-        format: 'image/png',
-        transparent: true,
-        version: '1.3.0',
-        attribution: '&copy; INEI Delimitación Distrital WMS &copy; CAPCORP'
-      });
-      group.addLayer(wmsLayer);
-    }
 
     // -----------------------------------------------------------------
     // CAPA 2: Epicentros del 18 de Julio en Chupaca (IGP - Datos Supabase)
@@ -1270,17 +1407,24 @@ export default function App() {
         report.type === 'damage_human' ? '❤️ Daño Humano / Salud' : 
         report.type === 'shelter_hub' ? '📦 Centro de acopio' : '🚨 Necesidad / Urgencia';
 
+      const statusBadge = 
+        report.status === 'Atendido' ? 'bg-emerald-100 text-emerald-800 border-emerald-300 font-bold' :
+        report.status === 'En proceso' ? 'bg-blue-100 text-blue-800 border-blue-300 font-bold' :
+        'bg-amber-100 text-amber-800 border-amber-300 font-bold';
+
+      const statusText = report.status || 'Pendiente';
+
       const popupContent = `
-        <div class="p-2.5 font-sans min-w-[200px] max-w-[240px]">
+        <div class="p-2.5 font-sans min-w-[210px] max-w-[250px]">
           <div class="flex items-center justify-between gap-1 border-b border-gray-100 pb-1.5 mb-1.5">
             <span class="text-[10px] font-bold text-gray-500 uppercase">${reportTypeLabel}</span>
             <span class="px-1 text-[9px] uppercase rounded ${severityBadgeColor}">${report.severity}</span>
           </div>
           <h4 class="font-bold text-gray-900 text-xs m-0 mb-1 leading-snug">${report.title}</h4>
           <p class="text-[11px] text-gray-600 m-0 line-clamp-3 leading-normal">${report.description}</p>
-          <div class="mt-2 pt-1 border-t border-gray-100 flex items-center justify-between text-[9px] text-gray-400">
-            <span>Por: <strong>${report.createdBy}</strong></span>
-            <span>Ver detalles en barra lateral</span>
+          <div class="mt-2 pt-1.5 border-t border-gray-100 flex items-center justify-between text-[9px]">
+            <span class="px-1.5 py-0.5 uppercase rounded border ${statusBadge}">${statusText}</span>
+            <span class="text-gray-500 font-medium">Por: <strong>${report.createdBy}</strong></span>
           </div>
         </div>
       `;
@@ -1346,7 +1490,7 @@ export default function App() {
       });
     }
 
-  }, [visibleLayers, reports, epicenters, severityFilter, selectedReport, wmsLayerLevel, isAdmin, pendingSolicitudes, selectedSolicitud]);
+  }, [visibleLayers, reports, epicenters, severityFilter, statusFilter, selectedReport, isAdmin, pendingSolicitudes, selectedSolicitud]);
 
   // --- ENFOCAR PUNTO EN EL MAPA ---
   const handleFocusOnMap = (lat: number, lng: number) => {
@@ -1367,11 +1511,6 @@ export default function App() {
       showToast('Coordenadas inválidas. Rango aproximado de Perú: Lat: [-18 a -1], Lng: [-82 a -68]', 'error');
     }
   };
-
-  // --- REPORTE Y FILTRADO POR SEVERIDAD ---
-  const filteredReports = severityFilter === 'todos' 
-    ? reports 
-    : reports.filter(r => r.severity === severityFilter);
 
   // --- CÁLCULO DE ESTADÍSTICAS RÁPIDAS ---
   const stats = {
@@ -1475,269 +1614,346 @@ export default function App() {
             </div>
           </div>
 
-          {/* CONTROLADORES DE CAPAS GIS (DE ABAJO HACIA ARRIBA EN PANEL) */}
-          <div className="hidden md:block bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60 space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-200/60 pb-1.5">
-              <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                <Layers className="w-4 h-4 text-slate-600" />
-                Jerarquía de Capas (GIS Layer Stack)
-              </span>
-              <span className="text-[9px] text-slate-400 font-mono">Orden de carga</span>
+          {/* CONTROLADORES DE CAPAS GIS (DESPLEGABLE / MENU COLLAPSIBLE) */}
+          <div className="hidden md:block bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60 transition-all">
+            <div 
+              onClick={() => setIsLayerStackOpen(!isLayerStackOpen)}
+              className="flex items-center justify-between cursor-pointer select-none group"
+            >
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-slate-200/60 rounded-lg text-slate-700 group-hover:bg-slate-300/60 transition-colors">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-slate-800 block">
+                    Jerarquía de Capas (GIS Layer Stack)
+                  </span>
+                  <span className="text-[9px] text-slate-400 font-mono block">
+                    {isLayerStackOpen ? 'Haz clic para colapsar' : 'Haz clic para desplegar capas'}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="p-1 rounded-lg hover:bg-slate-200/60 text-slate-600 transition-colors cursor-pointer"
+              >
+                {isLayerStackOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
             </div>
 
-            {/* Capa 5 (Arriba en panel para mantener el orden jerárquico estricto visual) */}
-            <div className="space-y-2.5">
+            {isLayerStackOpen && (
+              <div className="space-y-2.5 mt-3 pt-3 border-t border-slate-200/60">
 
-              {/* CAPA 7: Centro de acopio */}
-              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <input
-                  type="checkbox"
-                  id="chk-capa7"
-                  checked={visibleLayers.capa7}
-                  onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa7: e.target.checked }))}
-                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-emerald-650 focus:ring-emerald-500 bg-slate-50 accent-emerald-650 cursor-pointer"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="chk-capa7" className="text-xs font-bold text-emerald-850 flex items-center gap-1 select-none cursor-pointer">
-                      <span>Capa 7: Centro de acopio</span>
-                    </label>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-emerald-50 border border-emerald-200/60 text-emerald-800 rounded font-mono">
-                      {stats.shelterHubs}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                    Centros de acopio y ayuda autorizados (alimentos, ropa, medicinas). Simbología verde.
-                  </p>
-                </div>
-              </div>
-              
-              {/* CAPA 5: Necesidades y Urgencias */}
-              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <input
-                  type="checkbox"
-                  id="chk-capa5"
-                  checked={visibleLayers.capa5}
-                  onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa5: e.target.checked }))}
-                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 bg-slate-50 accent-amber-600 cursor-pointer"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="chk-capa5" className="text-xs font-bold text-amber-850 flex items-center gap-1 select-none cursor-pointer">
-                      <span>Capa 5: Necesidades y Urgencias</span>
-                    </label>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-amber-50 border border-amber-200/60 text-amber-800 rounded font-mono">
-                      {stats.urgentNeeds}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                    Ayuda humanitaria requerida (carpas, agua, víveres). Icono de exclamación.
-                  </p>
-                </div>
-              </div>
-
-              {/* CAPA 4: Daño Humano */}
-              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <input
-                  type="checkbox"
-                  id="chk-capa4"
-                  checked={visibleLayers.capa4}
-                  onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa4: e.target.checked }))}
-                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-red-600 focus:ring-red-500 bg-slate-50 accent-red-600 cursor-pointer"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="chk-capa4" className="text-xs font-bold text-red-850 flex items-center gap-1 select-none cursor-pointer">
-                      <span>Capa 4: Daño Humano / Salud</span>
-                    </label>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-red-50 border border-red-200/60 text-red-800 rounded font-mono">
-                      {stats.humanDamage}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                    Familias damnificadas, personas heridas o decesos. Icono médico.
-                  </p>
-                </div>
-              </div>
-
-              {/* CAPA 3: Daño Físico */}
-              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <input
-                  type="checkbox"
-                  id="chk-capa3"
-                  checked={visibleLayers.capa3}
-                  onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa3: e.target.checked }))}
-                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-orange-600 focus:ring-orange-500 bg-slate-50 accent-orange-600 cursor-pointer"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="chk-capa3" className="text-xs font-bold text-orange-850 flex items-center gap-1 select-none cursor-pointer">
-                      <span>Capa 3: Daño Físico / Infraestructura</span>
-                    </label>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-orange-50 border border-orange-200/60 text-orange-800 rounded font-mono">
-                      {stats.physicalDamage}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                    Casas destruidas, colegios, puentes y carreteras bloqueadas. Simbología naranja.
-                  </p>
-                </div>
-              </div>
-
-              {/* CAPA 2: Epicentros del 18 de Julio */}
-              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <input
-                  type="checkbox"
-                  id="chk-capa2"
-                  checked={visibleLayers.capa2}
-                  onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa2: e.target.checked }))}
-                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-slate-700 focus:ring-slate-500 bg-slate-50 accent-slate-700 cursor-pointer"
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="chk-capa2" className="text-xs font-bold text-slate-800 flex items-center gap-1 select-none cursor-pointer">
-                      <span>Capa 2: Epicentros del 18 de Julio</span>
-                    </label>
-                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-slate-100 border border-slate-200 text-slate-600 rounded font-mono">
-                      2 pts
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                    Epicentro principal (5.1 M) y réplica (3.4 M). Datos científicos IGP. Inamovibles.
-                  </p>
-                </div>
-              </div>
-
-              {/* CAPA 1: Delimitación Distrital */}
-              <div className="flex flex-col gap-2 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <div className="flex items-start gap-2.5">
+                {/* CAPA 7: Centro de acopio */}
+                <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
                   <input
                     type="checkbox"
-                    id="chk-capa1"
-                    checked={visibleLayers.capa1}
-                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa1: e.target.checked }))}
-                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-teal-600 focus:ring-teal-500 bg-slate-50 accent-teal-600 cursor-pointer"
+                    id="chk-capa7"
+                    checked={visibleLayers.capa7}
+                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa7: e.target.checked }))}
+                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-emerald-650 focus:ring-emerald-500 bg-slate-50 accent-emerald-650 cursor-pointer"
                   />
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
-                      <label htmlFor="chk-capa1" className="text-xs font-bold text-teal-850 flex items-center gap-1 select-none cursor-pointer">
-                        <span>Capa 1: Delimitación Distrital (WMS)</span>
+                      <label htmlFor="chk-capa7" className="text-xs font-bold text-emerald-850 flex items-center gap-1 select-none cursor-pointer">
+                        <span>Capa 7: Centro de acopio</span>
                       </label>
-                      <span className="text-[9px] font-bold px-1.5 py-0.2 bg-teal-50 border border-teal-200/60 text-teal-800 rounded font-mono uppercase">
-                        WMS INEI
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 bg-emerald-50 border border-emerald-200/60 text-emerald-800 rounded font-mono">
+                        {stats.shelterHubs}
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                      Límites cartográficos oficiales en tiempo real provistos por el geovisor de Censos Nacionales (INEI).
+                      Centros de acopio y ayuda autorizados (alimentos, ropa, medicinas). Simbología verde.
                     </p>
                   </div>
                 </div>
-
-                {visibleLayers.capa1 && (
-                  <div className="mt-1.5 pl-6 pt-1.5 border-t border-slate-100/70 flex items-center justify-between gap-1.5">
-                    <span className="text-[9px] font-bold text-slate-400 font-mono">NIVEL CARTOGRÁFICO:</span>
-                    <div className="flex gap-1">
-                      {[
-                        { label: 'Distrital', val: '3' },
-                        { label: 'Provincial', val: '2' },
-                        { label: 'Departamental', val: '1' }
-                      ].map((lvl) => (
-                        <button
-                          key={lvl.val}
-                          type="button"
-                          onClick={() => {
-                            setWmsLayerLevel(lvl.val as '3' | '2' | '1');
-                            showToast(`Capa WMS INEI de nivel ${lvl.label} activada.`, 'info');
-                          }}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-all cursor-pointer border ${
-                            wmsLayerLevel === lvl.val
-                              ? 'bg-slate-900 border-slate-900 text-white shadow-sm font-sans'
-                              : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800 font-sans'
-                          }`}
-                        >
-                          {lvl.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* CAPA 6: Centros Poblados (PostGIS) */}
-              <div className="flex flex-col gap-1 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
-                <div className="flex items-start gap-2.5">
+                
+                {/* CAPA 5: Necesidades y Urgencias */}
+                <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
                   <input
                     type="checkbox"
-                    id="chk-capa6"
-                    checked={visibleLayers.capa6}
-                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa6: e.target.checked }))}
-                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 bg-slate-50 accent-indigo-600 cursor-pointer"
+                    id="chk-capa5"
+                    checked={visibleLayers.capa5}
+                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa5: e.target.checked }))}
+                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 bg-slate-50 accent-amber-600 cursor-pointer"
                   />
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
-                      <label htmlFor="chk-capa6" className="text-xs font-bold text-indigo-850 flex items-center gap-1 select-none cursor-pointer">
-                        <span>Capa 6: Centros Poblados (PostGIS)</span>
+                      <label htmlFor="chk-capa5" className="text-xs font-bold text-amber-850 flex items-center gap-1 select-none cursor-pointer">
+                        <span>Capa 5: Necesidades y Urgencias</span>
                       </label>
-                      {isCentrosPobladosLoading ? (
-                        <span className="text-[9px] font-bold px-1.5 py-0.2 bg-indigo-50 text-indigo-600 rounded font-mono animate-pulse">
-                          Cargando...
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-bold px-1.5 py-0.2 bg-indigo-50 border border-indigo-200/60 text-indigo-800 rounded font-mono">
-                          {centrosPoblados.length} labels
-                        </span>
-                      )}
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 bg-amber-50 border border-amber-200/60 text-amber-800 rounded font-mono">
+                        {stats.urgentNeeds}
+                      </span>
                     </div>
                     <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
-                      Etiquetas de texto dinámicas sobre el mapa. Solo se cargan al hacer Zoom &ge; 14 (escala &le; 1 km) de la zona visible.
+                      Ayuda humanitaria requerida (carpas, agua, víveres). Icono de exclamación.
                     </p>
                   </div>
                 </div>
-              </div>
 
-            </div>
+                {/* CAPA 4: Daño Humano */}
+                <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
+                  <input
+                    type="checkbox"
+                    id="chk-capa4"
+                    checked={visibleLayers.capa4}
+                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa4: e.target.checked }))}
+                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-red-600 focus:ring-red-500 bg-slate-50 accent-red-600 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="chk-capa4" className="text-xs font-bold text-red-850 flex items-center gap-1 select-none cursor-pointer">
+                        <span>Capa 4: Daño Humano / Salud</span>
+                      </label>
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 bg-red-50 border border-red-200/60 text-red-800 rounded font-mono">
+                        {stats.humanDamage}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                      Familias damnificadas, personas heridas o decesos. Icono médico.
+                    </p>
+                  </div>
+                </div>
+
+                {/* CAPA 3: Daño Físico */}
+                <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
+                  <input
+                    type="checkbox"
+                    id="chk-capa3"
+                    checked={visibleLayers.capa3}
+                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa3: e.target.checked }))}
+                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-orange-600 focus:ring-orange-500 bg-slate-50 accent-orange-600 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="chk-capa3" className="text-xs font-bold text-orange-850 flex items-center gap-1 select-none cursor-pointer">
+                        <span>Capa 3: Daño Físico / Infraestructura</span>
+                      </label>
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 bg-orange-50 border border-orange-200/60 text-orange-800 rounded font-mono">
+                        {stats.physicalDamage}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                      Casas destruidas, colegios, puentes y carreteras bloqueadas. Simbología naranja.
+                    </p>
+                  </div>
+                </div>
+
+                {/* CAPA 2: Epicentros del 18 de Julio */}
+                <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
+                  <input
+                    type="checkbox"
+                    id="chk-capa2"
+                    checked={visibleLayers.capa2}
+                    onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa2: e.target.checked }))}
+                    className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-slate-700 focus:ring-slate-500 bg-slate-50 accent-slate-700 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="chk-capa2" className="text-xs font-bold text-slate-800 flex items-center gap-1 select-none cursor-pointer">
+                        <span>Capa 2: Epicentros del 18 de Julio</span>
+                      </label>
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 bg-slate-100 border border-slate-200 text-slate-600 rounded font-mono">
+                        2 pts
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                      Epicentro principal (5.1 M) y réplica (3.4 M). Datos científicos IGP. Inamovibles.
+                    </p>
+                  </div>
+                </div>
+
+                {/* CAPA 1: Delimitación Distrital / Cartográfica */}
+                <div className="flex flex-col gap-2 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
+                  <div className="flex items-start gap-2.5">
+                    <input
+                      type="checkbox"
+                      id="chk-capa1"
+                      checked={visibleLayers.capa1}
+                      onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa1: e.target.checked }))}
+                      className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-teal-600 focus:ring-teal-500 bg-slate-50 accent-teal-600 cursor-pointer"
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="chk-capa1" className="text-xs font-bold text-teal-850 flex items-center gap-1 select-none cursor-pointer">
+                          <span>Capa 1: Delimitación Distrital / Cartográfica</span>
+                        </label>
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 bg-teal-50 border border-teal-200/60 text-teal-800 rounded font-mono uppercase">
+                          EPSG:4326
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                        Límites poligonales vectoriales de distritos, provincias y departamentos desde Supabase (PostGIS) o WMS INEI.
+                      </p>
+                    </div>
+                  </div>
+
+                  {visibleLayers.capa1 && (
+                    <div className="mt-1.5 pl-6 pt-1.5 border-t border-slate-100/70 flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="text-[9px] font-bold text-slate-400 font-mono">NIVEL CARTOGRÁFICO:</span>
+                        <div className="flex gap-1 flex-wrap">
+                          {[
+                            { label: 'Distrital', val: '3' },
+                            { label: 'Provincial', val: '2' },
+                            { label: 'Departamental', val: '1' },
+                            { label: 'Auto (Zoom)', val: 'auto' }
+                          ].map((lvl) => (
+                            <button
+                              key={lvl.val}
+                              type="button"
+                              onClick={() => {
+                                setWmsLayerLevel(lvl.val as '3' | '2' | '1' | 'auto');
+                                showToast(`Nivel cartográfico activado: ${lvl.label}`, 'info');
+                              }}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-all cursor-pointer border ${
+                                wmsLayerLevel === lvl.val
+                                  ? 'bg-slate-900 border-slate-900 text-white shadow-sm font-sans'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800 font-sans'
+                              }`}
+                            >
+                              {lvl.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* CAPA 6: Centros Poblados (PostGIS) */}
+                <div className="flex flex-col gap-1 bg-white p-2.5 rounded-xl border border-slate-200/80 hover:border-slate-300 transition-all shadow-sm">
+                  <div className="flex items-start gap-2.5">
+                    <input
+                      type="checkbox"
+                      id="chk-capa6"
+                      checked={visibleLayers.capa6}
+                      onChange={(e) => setVisibleLayers(prev => ({ ...prev, capa6: e.target.checked }))}
+                      className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 bg-slate-50 accent-indigo-600 cursor-pointer"
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="chk-capa6" className="text-xs font-bold text-indigo-850 flex items-center gap-1 select-none cursor-pointer">
+                          <span>Capa 6: Centros Poblados (PostGIS)</span>
+                        </label>
+                        {isCentrosPobladosLoading ? (
+                          <span className="text-[9px] font-bold px-1.5 py-0.2 bg-indigo-50 text-indigo-600 rounded font-mono animate-pulse">
+                            Cargando...
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-1.5 py-0.2 bg-indigo-50 border border-indigo-200/60 text-indigo-800 rounded font-mono">
+                            {centrosPoblados.length} labels
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                        Etiquetas de texto dinámicas sobre el mapa. Solo se cargan al hacer Zoom &ge; 14 (escala &le; 1 km) de la zona visible.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            )}
           </div>
 
-          {/* FILTRO DE SEVERIDAD RÁPIDO */}
-          <div className="bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-700">Filtro de Gravedad del Impacto</span>
-              {severityFilter !== 'todos' && (
-                <button 
-                  onClick={() => setSeverityFilter('todos')}
-                  className="text-[10px] text-slate-500 hover:text-slate-900 underline cursor-pointer"
-                >
-                  Ver todos
-                </button>
-              )}
+          {/* SECCIÓN DE FILTROS (ESTADO DE ATENCIÓN Y SEVERIDAD) */}
+          <div className="bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60 space-y-3">
+            {/* FILTRO POR ESTADO DE ATENCIÓN */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                  <CheckCircle className="w-3.5 h-3.5 text-blue-600" />
+                  Filtro por Estado de Atención
+                </span>
+                {statusFilter !== 'todos' && (
+                  <button 
+                    onClick={() => setStatusFilter('todos')}
+                    className="text-[10px] text-slate-500 hover:text-slate-900 underline cursor-pointer"
+                  >
+                    Ver todos
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {[
+                  { id: 'todos', label: 'Todos', count: reports.length, activeStyle: 'bg-slate-900 border-slate-900 text-white font-bold' },
+                  { id: 'Pendiente', label: '🟡 Pendiente', count: reports.filter(r => (r.status || 'Pendiente') === 'Pendiente').length, activeStyle: 'bg-amber-600 border-amber-600 text-white font-bold' },
+                  { id: 'En proceso', label: '🔵 En proceso', count: reports.filter(r => r.status === 'En proceso').length, activeStyle: 'bg-blue-600 border-blue-600 text-white font-bold' },
+                  { id: 'Atendido', label: '🟢 Atendido', count: reports.filter(r => r.status === 'Atendido').length, activeStyle: 'bg-emerald-600 border-emerald-600 text-white font-bold' }
+                ].map((item) => {
+                  const isActive = statusFilter === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => setStatusFilter(item.id)}
+                      className={`px-2.5 py-1 rounded-xl text-[11px] font-medium border transition-all cursor-pointer flex items-center gap-1.5 ${
+                        isActive 
+                          ? `${item.activeStyle} shadow-sm` 
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-350 hover:text-slate-900 shadow-sm'
+                      }`}
+                    >
+                      <span>{item.label}</span>
+                      <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                        isActive
+                          ? 'bg-white/20 text-white'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}>
+                        {item.count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div className="flex flex-wrap gap-1">
-              {[
-                { id: 'todos', label: 'Todos', count: reports.length },
-                { id: 'critico', label: 'Crítico', count: reports.filter(r => r.severity === 'critico').length },
-                { id: 'alto', label: 'Alto', count: reports.filter(r => r.severity === 'alto').length },
-                { id: 'medio', label: 'Medio', count: reports.filter(r => r.severity === 'medio').length },
-                { id: 'bajo', label: 'Bajo', count: reports.filter(r => r.severity === 'bajo').length }
-              ].map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => setSeverityFilter(item.id)}
-                  className={`px-2.5 py-1 rounded-xl text-[11px] font-medium capitalize border transition-all cursor-pointer flex items-center gap-1.5 ${
-                    severityFilter === item.id 
-                      ? 'bg-slate-900 border-slate-900 text-white shadow-sm font-bold' 
-                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-350 hover:text-slate-900 shadow-sm'
-                  }`}
-                >
-                  <span>{item.label}</span>
-                  <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
-                    severityFilter === item.id
-                      ? 'bg-white/20 text-white'
-                      : 'bg-slate-100 text-slate-600'
-                  }`}>
-                    {item.count}
-                  </span>
-                </button>
-              ))}
+
+            <div className="border-t border-slate-200/50"></div>
+
+            {/* FILTRO DE GRAVEDAD DEL IMPACTO */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                  Filtro de Gravedad del Impacto
+                </span>
+                {severityFilter !== 'todos' && (
+                  <button 
+                    onClick={() => setSeverityFilter('todos')}
+                    className="text-[10px] text-slate-500 hover:text-slate-900 underline cursor-pointer"
+                  >
+                    Ver todos
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {[
+                  { id: 'todos', label: 'Todos', count: reports.length },
+                  { id: 'critico', label: 'Crítico', count: reports.filter(r => r.severity === 'critico').length },
+                  { id: 'alto', label: 'Alto', count: reports.filter(r => r.severity === 'alto').length },
+                  { id: 'medio', label: 'Medio', count: reports.filter(r => r.severity === 'medio').length },
+                  { id: 'bajo', label: 'Bajo', count: reports.filter(r => r.severity === 'bajo').length }
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => setSeverityFilter(item.id)}
+                    className={`px-2.5 py-1 rounded-xl text-[11px] font-medium capitalize border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      severityFilter === item.id 
+                        ? 'bg-slate-900 border-slate-900 text-white shadow-sm font-bold' 
+                        : 'bg-white border-slate-200 text-slate-600 hover:border-slate-350 hover:text-slate-900 shadow-sm'
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                      severityFilter === item.id
+                        ? 'bg-white/20 text-white'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {item.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1746,14 +1962,16 @@ export default function App() {
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-700">Puntos Críticos de Campo</span>
               <span className="text-[10px] text-slate-400 font-mono">
-                {severityFilter === 'todos' ? `Mostrando ${reports.length}` : `Mostrando ${filteredReports.length} de ${reports.length}`}
+                {severityFilter === 'todos' && statusFilter === 'todos' 
+                  ? `Mostrando ${reports.length}` 
+                  : `Mostrando ${filteredReports.length} de ${reports.length}`}
               </span>
             </div>
             
             <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
               {filteredReports.length === 0 ? (
                 <div className="p-3 text-center bg-white border border-dashed border-slate-200 rounded-xl">
-                  <p className="text-[11px] text-slate-500 font-medium">No hay reportes con gravedad "{severityFilter}".</p>
+                  <p className="text-[11px] text-slate-500 font-medium">No hay reportes que coincidan con los filtros seleccionados.</p>
                 </div>
               ) : (
                 filteredReports.map((report) => (
@@ -1782,13 +2000,22 @@ export default function App() {
                          report.type === 'damage_human' ? 'Salud' : 
                          report.type === 'shelter_hub' ? 'Acopio' : 'Urgencia'}
                       </span>
-                      <span className={`text-[8px] font-mono font-bold px-1.5 py-0.2 rounded uppercase ${
-                        report.severity === 'critico' ? 'bg-red-500 text-white' :
-                        report.severity === 'alto' ? 'bg-orange-500 text-white' :
-                        report.severity === 'medio' ? 'bg-amber-500 text-white' : 'bg-slate-100 border border-slate-200 text-slate-700'
-                      }`}>
-                        {report.severity}
-                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase border ${
+                          report.status === 'Atendido' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                          report.status === 'En proceso' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                          'bg-amber-50 text-amber-700 border-amber-200'
+                        }`}>
+                          {report.status || 'Pendiente'}
+                        </span>
+                        <span className={`text-[8px] font-mono font-bold px-1.5 py-0.2 rounded uppercase ${
+                          report.severity === 'critico' ? 'bg-red-500 text-white' :
+                          report.severity === 'alto' ? 'bg-orange-500 text-white' :
+                          report.severity === 'medio' ? 'bg-amber-500 text-white' : 'bg-slate-100 border border-slate-200 text-slate-700'
+                        }`}>
+                          {report.severity}
+                        </span>
+                      </div>
                     </div>
                     <h5 className="text-xs font-semibold text-slate-900 truncate">{report.title}</h5>
                     <div className="flex items-center justify-between text-[9px] text-slate-400 mt-1">
@@ -2105,6 +2332,31 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-2.5 bg-slate-50 p-3 rounded-2xl border border-slate-200/50 text-[11px]">
+                  <div className="col-span-2 flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-200/80 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 font-semibold text-[10px]">Estado de Atención:</span>
+                      <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded-full uppercase border flex items-center gap-1.5 ${
+                        selectedReport.status === 'Atendido' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                        selectedReport.status === 'En proceso' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                        'bg-amber-50 text-amber-700 border-amber-200'
+                      }`}>
+                        <span className={`w-2 h-2 rounded-full ${
+                          selectedReport.status === 'Atendido' ? 'bg-emerald-500 animate-pulse' :
+                          selectedReport.status === 'En proceso' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500 animate-pulse'
+                        }`}></span>
+                        {selectedReport.status || 'Pendiente'}
+                      </span>
+                    </div>
+                    {activeRole === 'admin' && (
+                      <button
+                        onClick={() => setIsEditingReport(true)}
+                        className="text-[10px] font-bold text-blue-600 hover:text-blue-800 underline cursor-pointer"
+                      >
+                        Editar Estado
+                      </button>
+                    )}
+                  </div>
+
                   <div>
                     <span className="text-slate-400 block font-medium">Severidad</span>
                     <span className="font-bold capitalize flex items-center gap-1 text-slate-800">
@@ -2139,6 +2391,13 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+
+                {/* GALERÍA DE EVIDENCIA FOTOGRÁFICA (COMPRIMIDA WEBP SUPABASE) */}
+                <ImageGallery
+                  reporteId={selectedReport.id}
+                  isAdmin={activeRole === 'admin'}
+                  onNotification={showToast}
+                />
 
                 <div className="flex gap-2 pt-1.5 border-t border-slate-200">
                   <button
@@ -2206,6 +2465,22 @@ export default function App() {
                 </div>
 
                 <div>
+                  <label className="block text-[10px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>Estado de Atención (Gestión COER)</span>
+                    <span className="text-[9px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">Modo Admin</span>
+                  </label>
+                  <select
+                    value={selectedReport.status || 'Pendiente'}
+                    onChange={(e) => setSelectedReport(prev => prev ? { ...prev, status: e.target.value } : null)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                  >
+                    <option value="Pendiente">🟡 Pendiente (Sin atender)</option>
+                    <option value="En proceso">🔵 En proceso (Brigada / Desplegada)</option>
+                    <option value="Atendido">🟢 Atendido (Situación resuelta)</option>
+                  </select>
+                </div>
+
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 mb-1">Gravedad / Severidad</label>
                   <select
                     value={selectedReport.severity}
@@ -2247,6 +2522,13 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                {/* GESTIÓN DE FOTOS EN MODO ADMINISTRADOR/EDICIÓN */}
+                <ImageGallery
+                  reporteId={selectedReport.id}
+                  isAdmin={true}
+                  onNotification={showToast}
+                />
 
                 <div className="flex gap-2 pt-2 border-t border-slate-200">
                   <button
@@ -2444,12 +2726,28 @@ export default function App() {
                   </label>
                   <input
                     type="text"
+                    placeholder={activeRole === 'admin' ? 'Ej: COER Junín' : 'Su nombre / institución'}
                     value={newReport.createdBy}
                     onChange={(e) => setNewReport(prev => ({ ...prev, createdBy: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
                   />
                 </div>
               </div>
+
+              {activeRole === 'admin' && (
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-700 mb-1">Estado de Atención Inicial</label>
+                  <select
+                    value={newReport.status || 'Pendiente'}
+                    onChange={(e) => setNewReport(prev => ({ ...prev, status: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                  >
+                    <option value="Pendiente">🟡 Pendiente</option>
+                    <option value="En proceso">🔵 En proceso</option>
+                    <option value="Atendido">🟢 Atendido</option>
+                  </select>
+                </div>
+              )}
 
               <div className="flex gap-2 pt-2 border-t border-slate-200">
                 <button
@@ -2647,6 +2945,13 @@ export default function App() {
                   <option value="Atendido">Atendido</option>
                 </select>
               </div>
+
+              {/* EVIDENCIA FOTOGRÁFICA DE LA SOLICITUD */}
+              <ImageGallery
+                solicitudId={selectedSolicitud.id}
+                isAdmin={true}
+                onNotification={showToast}
+              />
 
               {/* Botones de acción final: "Aprobar y Registrar" y "Denegar Solicitud" */}
               <div className="flex flex-col gap-1.5 pt-2 border-t border-slate-200">

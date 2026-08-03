@@ -64,3 +64,12 @@ export interface SolicitudReporte {
   estado_solicitud: 'pendiente' | 'aprobado' | 'denegado';
 }
 
+export interface ReporteImagen {
+  id: number;
+  reporte_id?: number | null;
+  solicitud_id?: number | null;
+  url_imagen: string;
+  storage_path: string;
+  fecha_subida: string;
+}
+

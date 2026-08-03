@@ -164,3 +164,65 @@ export function mapSolicitud(row: any): SolicitudReporte {
   };
 }
 
+/**
+ * Fetches GeoJSON cartographic layers from Supabase tables:
+ * public.departamentos (coddep, departamento, geom)
+ * public.provincias (codprov_full, coddep, provincia, capital, geom)
+ * public.distritos (ubigeo, codprov_full, distrito, capital, coddist, geom)
+ */
+export async function fetchCartographicLayer(level: '1' | '2' | '3' | 'departamental' | 'provincial' | 'distrital') {
+  let tableName = 'distritos';
+  let fields = 'ubigeo, codprov_full, distrito, capital, coddist, geom';
+  
+  if (level === '1' || level === 'departamental') {
+    tableName = 'departamentos';
+    fields = 'coddep, departamento, geom';
+  } else if (level === '2' || level === 'provincial') {
+    tableName = 'provincias';
+    fields = 'codprov_full, coddep, provincia, capital, geom';
+  } else {
+    tableName = 'distritos';
+    fields = 'ubigeo, codprov_full, distrito, capital, coddist, geom';
+  }
+
+  try {
+    const { data, error } = await supabase.from(tableName).select(fields);
+    if (error || !data || data.length === 0) {
+      console.warn(`[Supabase GIS] No data in table ${tableName}:`, error?.message || 'Tabla vacía o sin registros');
+      return null;
+    }
+
+    const features = data.map((row: any) => {
+      let geometry = row.geom;
+      if (typeof geometry === 'string') {
+        try {
+          geometry = JSON.parse(geometry);
+        } catch (e) {
+          // If geometry string is WKT or other format, keep raw
+        }
+      }
+      
+      const { geom, ...properties } = row;
+      return {
+        type: 'Feature' as const,
+        geometry,
+        properties
+      };
+    }).filter(f => f.geometry && typeof f.geometry === 'object');
+
+    if (features.length === 0) return null;
+
+    return {
+      tableName,
+      geoJson: {
+        type: 'FeatureCollection' as const,
+        features
+      }
+    };
+  } catch (err) {
+    console.error(`[Supabase GIS] Error querying ${tableName}:`, err);
+    return null;
+  }
+}
+
+

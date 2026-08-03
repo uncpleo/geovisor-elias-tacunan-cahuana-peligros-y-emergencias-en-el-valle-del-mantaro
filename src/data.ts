@@ -35,7 +35,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3082,
     createdAt: '2026-07-18T16:10:00.000Z',
     updatedAt: '2026-07-18T16:10:00.000Z',
-    createdBy: 'COER Junín'
+    createdBy: 'COER Junín',
+    status: 'En proceso'
   },
   {
     id: 'rep_2',
@@ -48,7 +49,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3312,
     createdAt: '2026-07-18T16:30:00.000Z',
     updatedAt: '2026-07-18T17:15:00.000Z',
-    createdBy: 'Muni Chupaca'
+    createdBy: 'Muni Chupaca',
+    status: 'Pendiente'
   },
   {
     id: 'rep_3',
@@ -61,7 +63,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3418,
     createdAt: '2026-07-18T16:22:00.000Z',
     updatedAt: '2026-07-18T16:22:00.000Z',
-    createdBy: 'MINSA Chupaca'
+    createdBy: 'MINSA Chupaca',
+    status: 'Atendido'
   },
   {
     id: 'rep_4',
@@ -74,7 +77,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3195,
     createdAt: '2026-07-18T18:05:00.000Z',
     updatedAt: '2026-07-18T18:05:00.000Z',
-    createdBy: 'INDECI Chupaca'
+    createdBy: 'INDECI Chupaca',
+    status: 'Pendiente'
   },
   {
     id: 'rep_5',
@@ -87,7 +91,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3142,
     createdAt: '2026-07-18T17:40:00.000Z',
     updatedAt: '2026-07-18T17:40:00.000Z',
-    createdBy: 'UGEL Chupaca'
+    createdBy: 'UGEL Chupaca',
+    status: 'En proceso'
   },
   {
     id: 'rep_6',
@@ -100,7 +105,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3015,
     createdAt: '2026-07-18T18:50:00.000Z',
     updatedAt: '2026-07-18T18:50:00.000Z',
-    createdBy: 'INDECI Junín'
+    createdBy: 'INDECI Junín',
+    status: 'Pendiente'
   },
   {
     id: 'rep_7',
@@ -113,7 +119,8 @@ export const INITIAL_REPORTS: Report[] = [
     lng: -75.3135,
     createdAt: '2026-07-18T19:00:00.000Z',
     updatedAt: '2026-07-18T19:00:00.000Z',
-    createdBy: 'Muni Chupaca'
+    createdBy: 'Muni Chupaca',
+    status: 'Atendido'
   }
 ];
 
