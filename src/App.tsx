@@ -24,7 +24,8 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle,
-  XCircle
+  XCircle,
+  Search
 } from 'lucide-react';
 import {
   INITIAL_REPORTS,
@@ -114,6 +115,8 @@ export default function App() {
   const [severityFilter, setSeverityFilter] = useState<string>('todos');
   // Filtro de estado de atención activo
   const [statusFilter, setStatusFilter] = useState<string>('todos');
+  // Filtro de búsqueda por coincidencia (Título, Descripción, Registrado por)
+  const [criticalSearchQuery, setCriticalSearchQuery] = useState<string>('');
 
   // Estado para desplegar/colapsar el menú Jerarquía de Capas (GIS Layer Stack)
   const [isLayerStackOpen, setIsLayerStackOpen] = useState<boolean>(true);
@@ -1116,11 +1119,28 @@ export default function App() {
     };
   }, [activeRole]);
 
-  // --- REPORTE Y FILTRADO POR SEVERIDAD Y ESTADO DE ATENCIÓN ---
+  // --- REPORTE Y FILTRADO POR SEVERIDAD, ESTADO DE ATENCIÓN Y BÚSQUEDA ---
   const filteredReports = reports.filter(r => {
     const matchSeverity = severityFilter === 'todos' || r.severity === severityFilter;
     const matchStatus = statusFilter === 'todos' || (r.status || 'Pendiente') === statusFilter;
-    return matchSeverity && matchStatus;
+
+    let matchQuery = true;
+    if (criticalSearchQuery.trim()) {
+      const words = criticalSearchQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+      const titleText = (r.title || '').toLowerCase();
+      const descText = (r.description || '').toLowerCase();
+      const createdByText = (r.createdBy || '').toLowerCase();
+      const subTypeText = (r.subType || '').toLowerCase();
+
+      matchQuery = words.every(word =>
+        titleText.includes(word) ||
+        descText.includes(word) ||
+        createdByText.includes(word) ||
+        subTypeText.includes(word)
+      );
+    }
+
+    return matchSeverity && matchStatus && matchQuery;
   });
 
   // --- COMPILAR Y RENDERIZAR CAPA 1: DELIMITACIÓN CARTOGRÁFICA (SUPABASE GIS / WMS INEI) ---
@@ -1957,21 +1977,56 @@ export default function App() {
             </div>
           </div>
 
-          {/* LISTA RÁPIDA DE ALERTAS REPORTADAS */}
+          {/* LISTA RÁPIDA DE ALERTAS REPORTADAS CON BÚSQUEDA */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-700">Puntos Críticos de Campo</span>
               <span className="text-[10px] text-slate-400 font-mono">
-                {severityFilter === 'todos' && statusFilter === 'todos' 
+                {severityFilter === 'todos' && statusFilter === 'todos' && !criticalSearchQuery.trim()
                   ? `Mostrando ${reports.length}` 
                   : `Mostrando ${filteredReports.length} de ${reports.length}`}
               </span>
             </div>
-            
-            <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+
+            {/* CAMPO DE BÚSQUEDA POR COINCIDENCIA EN TIEMPO REAL */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <input
+                type="text"
+                value={criticalSearchQuery}
+                onChange={(e) => setCriticalSearchQuery(e.target.value)}
+                placeholder="Buscar por título, descripción, registrado por..."
+                className="w-full pl-8 pr-7 py-1.5 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition-all placeholder:text-slate-400 shadow-2xs"
+              />
+              {criticalSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setCriticalSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 rounded-full transition-all cursor-pointer"
+                  title="Limpiar búsqueda"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
               {filteredReports.length === 0 ? (
                 <div className="p-3 text-center bg-white border border-dashed border-slate-200 rounded-xl">
-                  <p className="text-[11px] text-slate-500 font-medium">No hay reportes que coincidan con los filtros seleccionados.</p>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    {criticalSearchQuery.trim()
+                      ? `No se encontraron coincidencias para "${criticalSearchQuery.trim()}".`
+                      : 'No hay reportes que coincidan con los filtros seleccionados.'}
+                  </p>
+                  {criticalSearchQuery.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setCriticalSearchQuery('')}
+                      className="mt-1 text-[10px] font-bold text-teal-600 hover:text-teal-700 underline cursor-pointer"
+                    >
+                      Limpiar búsqueda
+                    </button>
+                  )}
                 </div>
               ) : (
                 filteredReports.map((report) => (
@@ -2018,8 +2073,11 @@ export default function App() {
                       </div>
                     </div>
                     <h5 className="text-xs font-semibold text-slate-900 truncate">{report.title}</h5>
-                    <div className="flex items-center justify-between text-[9px] text-slate-400 mt-1">
-                      <span className="font-medium text-slate-500">{report.createdBy}</span>
+                    {report.description && (
+                      <p className="text-[10px] text-slate-500 line-clamp-1 mt-0.5 leading-tight">{report.description}</p>
+                    )}
+                    <div className="flex items-center justify-between text-[9px] text-slate-400 mt-1 pt-1 border-t border-slate-100">
+                      <span className="font-medium text-slate-600 truncate max-w-[150px]">👤 {report.createdBy}</span>
                       <span className="font-mono">Lat: {report.lat.toFixed(3)}</span>
                     </div>
                   </div>

@@ -28,6 +28,8 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+
   // Cargar imágenes desde Supabase al montar o cambiar de spot
   const loadImages = async () => {
     if (!reporteId && !solicitudId) {
@@ -94,20 +96,19 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({
   };
 
   // Eliminar foto (Storage + BD)
-  const handleDelete = async (imagen: ReporteImagen, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDelete = async (imagen: ReporteImagen, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     if (!isAdmin) return;
 
-    if (!window.confirm('¿Está seguro de eliminar esta evidencia fotográfica? Se borrará de Supabase Storage y de la base de datos.')) {
-      return;
-    }
-
     setDeletingId(imagen.id);
+    setConfirmDeleteId(null);
     try {
       await deleteReporteImagen(imagen);
       setImages(prev => prev.filter(img => img.id !== imagen.id));
+      setLightboxIndex(null);
       if (onNotification) onNotification('Imagen eliminada de Supabase Storage y base de datos.', 'success');
     } catch (err: any) {
+      console.error('[ImageGallery] Error al eliminar:', err);
       if (onNotification) onNotification(`Error al eliminar la evidencia: ${err?.message || err}`, 'error');
     } finally {
       setDeletingId(null);
@@ -194,21 +195,53 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({
                 </div>
               </div>
 
-              {/* BOTÓN DE ELIMINACIÓN (SOLO ADMIN) */}
+              {/* OVERLAY DE CONFIRMACIÓN / BOTÓN DE ELIMINACIÓN (SOLO ADMIN) */}
               {isAdmin && !readOnly && (
-                <button
-                  type="button"
-                  onClick={(e) => handleDelete(img, e)}
-                  disabled={deletingId === img.id}
-                  className="absolute top-1 right-1 p-1 bg-red-600/90 hover:bg-red-700 text-white rounded-md shadow-md opacity-0 group-hover:opacity-100 transition-all hover:scale-110 cursor-pointer border border-white/20"
-                  title="Eliminar evidencia fotográfica"
-                >
-                  {deletingId === img.id ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Trash2 className="w-3 h-3" />
-                  )}
-                </button>
+                confirmDeleteId === img.id ? (
+                  <div 
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute inset-0 bg-slate-950/90 backdrop-blur-xs flex flex-col items-center justify-center p-1 text-center z-20 animate-fade-in"
+                  >
+                    <span className="text-[10px] font-bold text-red-300 mb-1">¿Borrar foto?</span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => handleDelete(img, e)}
+                        disabled={deletingId === img.id}
+                        className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-[9px] font-bold text-white rounded transition-all cursor-pointer"
+                      >
+                        {deletingId === img.id ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : 'Sí'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDeleteId(null);
+                        }}
+                        className="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-[9px] font-bold text-slate-200 rounded transition-all cursor-pointer"
+                      >
+                        No
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmDeleteId(img.id);
+                    }}
+                    disabled={deletingId === img.id}
+                    className="absolute top-1 right-1 z-10 p-1.5 bg-red-600/90 hover:bg-red-700 active:bg-red-800 text-white rounded-lg shadow-md transition-all hover:scale-110 cursor-pointer border border-white/30"
+                    title="Eliminar evidencia fotográfica"
+                  >
+                    {deletingId === img.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )
               )}
             </div>
           ))}
@@ -222,6 +255,9 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({
           currentIndex={lightboxIndex}
           onClose={() => setLightboxIndex(null)}
           onNavigate={(newIdx) => setLightboxIndex(newIdx)}
+          isAdmin={isAdmin}
+          onDelete={(img) => handleDelete(img)}
+          isDeleting={deletingId !== null}
         />
       )}
     </div>

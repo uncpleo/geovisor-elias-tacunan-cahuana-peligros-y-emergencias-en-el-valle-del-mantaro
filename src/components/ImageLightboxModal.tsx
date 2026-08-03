@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { X, ChevronLeft, ChevronRight, Calendar, HardDrive } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Calendar, HardDrive, Trash2, Loader2 } from 'lucide-react';
 import { ReporteImagen } from '../types';
 
 interface ImageLightboxModalProps {
@@ -7,15 +7,26 @@ interface ImageLightboxModalProps {
   currentIndex: number;
   onClose: () => void;
   onNavigate: (index: number) => void;
+  isAdmin?: boolean;
+  onDelete?: (imagen: ReporteImagen) => void;
+  isDeleting?: boolean;
 }
 
 export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
   images,
   currentIndex,
   onClose,
-  onNavigate
+  onNavigate,
+  isAdmin = false,
+  onDelete,
+  isDeleting = false
 }) => {
   const currentImg = images[currentIndex];
+  const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
+
+  useEffect(() => {
+    setShowDeleteConfirm(false);
+  }, [currentIndex]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -36,6 +47,13 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
       })
     : '';
 
+  const handleConfirmDeleteClick = () => {
+    if (onDelete && currentImg) {
+      onDelete(currentImg);
+      setShowDeleteConfirm(false);
+    }
+  };
+
   return (
     <div 
       className="fixed inset-0 z-[2500] bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-between p-4 md:p-6 animate-fade-in"
@@ -55,13 +73,53 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
           )}
         </div>
 
-        <button
-          onClick={onClose}
-          className="p-2 rounded-full bg-white/10 hover:bg-white/20 active:bg-white/30 text-white transition-all cursor-pointer border border-white/20 hover:scale-105"
-          title="Cerrar vista previa (Esc)"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          {isAdmin && onDelete && (
+            showDeleteConfirm ? (
+              <div className="flex items-center gap-1.5 bg-red-950/80 border border-red-500/80 px-2.5 py-1 rounded-full text-xs font-bold animate-fade-in">
+                <span className="text-red-200 text-[11px]">¿Eliminar foto?</span>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteClick}
+                  disabled={isDeleting}
+                  className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold rounded-full transition-all cursor-pointer shadow-sm"
+                >
+                  {isDeleting ? <Loader2 className="w-3 h-3 animate-spin inline" /> : 'Sí, borrar'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-full transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={isDeleting}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-red-600/90 hover:bg-red-700 active:bg-red-800 text-white text-xs font-bold transition-all cursor-pointer border border-red-400 shadow-md hover:scale-105 disabled:opacity-50"
+                title="Eliminar esta foto (Administrador)"
+              >
+                {isDeleting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
+                <span>Eliminar</span>
+              </button>
+            )
+          )}
+
+          <button
+            onClick={onClose}
+            className="p-2 rounded-full bg-white/10 hover:bg-white/20 active:bg-white/30 text-white transition-all cursor-pointer border border-white/20 hover:scale-105"
+            title="Cerrar vista previa (Esc)"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* CONTENEDOR PRINCIPAL DE LA IMAGEN CON NAVEGACIÓN */}
@@ -113,12 +171,13 @@ export const ImageLightboxModal: React.FC<ImageLightboxModalProps> = ({
         </div>
         <div className="h-3 w-px bg-white/20"></div>
         <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-400">
-          <HardDrive className="w-3.5 h-3.5 text-blue-400" />
-          <span className="truncate max-w-[180px]" title={currentImg.storage_path}>
-            Supabase WebP
+          <HardDrive className="w-3.5 h-3.5 text-teal-400" />
+          <span className="truncate max-w-[220px]" title={currentImg.storage_path}>
+            {currentImg.storage_path || 'Supabase Storage'}
           </span>
         </div>
       </div>
     </div>
   );
 };
+
