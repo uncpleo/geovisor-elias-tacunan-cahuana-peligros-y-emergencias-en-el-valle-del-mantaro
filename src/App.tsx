@@ -25,7 +25,10 @@ import {
   ChevronUp,
   CheckCircle,
   XCircle,
-  Search
+  Search,
+  UploadCloud,
+  Camera,
+  Loader2
 } from 'lucide-react';
 import {
   INITIAL_REPORTS,
@@ -45,6 +48,7 @@ import {
   fetchCartographicLayer
 } from './supabaseClient';
 import { ImageGallery } from './components/ImageGallery';
+import { approveSolicitud, rejectSolicitud, purgeReporteImages, uploadReporteImagen } from './utils/imageUtils';
 
 // Password para acceder al panel de administración de respaldo
 const ADMIN_PASSWORD = 'chupaca2026';
@@ -124,6 +128,26 @@ export default function App() {
   // Estado para creación de reporte (formulario dinámico)
   const [isCreatingReport, setIsCreatingReport] = useState(false);
   const [clickCoords, setClickCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [publicPhotos, setPublicPhotos] = useState<File[]>([]);
+  const [uploadStatusText, setUploadStatusText] = useState<string>('');
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const newFiles = (Array.from(e.target.files) as File[]).filter(file => file.type.startsWith('image/'));
+    
+    if (publicPhotos.length + newFiles.length > 3) {
+      showToast('Puede adjuntar un máximo de 3 fotografías por solicitud.', 'error');
+    }
+
+    const combined = [...publicPhotos, ...newFiles].slice(0, 3);
+    setPublicPhotos(combined);
+    e.target.value = '';
+  };
+
+  const handleRemovePhoto = (index: number) => {
+    setPublicPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
   const [newReport, setNewReport] = useState<{
     type: ReportType;
     subType: string;
@@ -220,7 +244,13 @@ export default function App() {
 
       if (insertError) throw insertError;
 
-      // b) Cambiar estado en 'solicitudes_reporte' a 'aprobado'
+      // b) Relinkear las fotos de la solicitud al nuevo reporte_id (UPDATE reportes_imagenes SET reporte_id = nuevo_id, solicitud_id = NULL)
+      if (reportData && reportData.length > 0) {
+        const nuevoReporteId = reportData[0].id;
+        await approveSolicitud(selectedSolicitud.id, nuevoReporteId);
+      }
+
+      // c) Cambiar estado en 'solicitudes_reporte' a 'aprobado'
       const { error: updateError } = await supabase
         .from('solicitudes_reporte')
         .update({ estado_solicitud: 'aprobado' })
@@ -237,35 +267,31 @@ export default function App() {
       setPendingSolicitudes(prev => prev.filter(s => s.id !== selectedSolicitud.id));
       setSelectedSolicitud(null);
       setIsEditingSolicitud(false);
-      showToast('Solicitud aprobada e integrada con éxito al geovisor oficial.', 'success');
+      showToast('Solicitud aprobada y evidencias fotográficas asociadas al reporte oficial.', 'success');
     } catch (err: any) {
       console.error('Error aprobando solicitud:', err);
-      showToast('Error de conexión al aprobar solicitud.', 'error');
+      showToast('Error de conexión al aprobar la solicitud.', 'error');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- DENEGAR SOLICITUD ---
+  // --- DENEGAR / RECHAZAR SOLICITUD ---
   const handleDenySolicitud = async () => {
     if (!selectedSolicitud) return;
 
     setIsSubmitting(true);
     try {
-      const { error } = await supabase
-        .from('solicitudes_reporte')
-        .update({ estado_solicitud: 'denegado' })
-        .eq('id', Number(selectedSolicitud.id));
-
-      if (error) throw error;
+      // Requerimiento 2: Purgar archivos de emergencias-bucket y limpiar BD
+      await rejectSolicitud(selectedSolicitud.id);
 
       setPendingSolicitudes(prev => prev.filter(s => s.id !== selectedSolicitud.id));
       setSelectedSolicitud(null);
       setIsEditingSolicitud(false);
-      showToast('Solicitud denegada y removida del geovisor.', 'info');
+      showToast('Solicitud denegada y archivos de imagen eliminados de Supabase Storage.', 'info');
     } catch (err: any) {
       console.error('Error al denegar solicitud:', err);
-      showToast('Error de conexión al denegar solicitud.', 'error');
+      showToast('Error al rechazar y purgar la solicitud.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -547,7 +573,8 @@ export default function App() {
     if (activeRole !== 'admin') {
       // COMPORTAMIENTO PARA USUARIOS NO-ADMIN -> solicitudes_reporte
       try {
-        const { error } = await supabase
+        setUploadStatusText('Guardando datos de solicitud...');
+        const { data, error } = await supabase
           .from('solicitudes_reporte')
           .insert([
             {
@@ -562,13 +589,40 @@ export default function App() {
               ubicacion: `POINT(${lngVal} ${latVal})`,
               estado_solicitud: 'pendiente'
             }
-          ]);
+          ])
+          .select();
 
         if (error) throw error;
 
-        showToast('Solicitud de reporte enviada con éxito. Pendiente de aprobación.', 'success');
+        const newSolicitudId = data && data.length > 0 ? data[0].id : null;
+
+        // Subida de evidencias fotográficas si se adjuntaron fotos
+        if (newSolicitudId && publicPhotos.length > 0) {
+          let uploadCount = 0;
+          for (let i = 0; i < publicPhotos.length; i++) {
+            setUploadStatusText(`Procesando y subiendo foto (${i + 1}/${publicPhotos.length})...`);
+            try {
+              await uploadReporteImagen(publicPhotos[i], { solicitudId: newSolicitudId });
+              uploadCount++;
+            } catch (imgErr: any) {
+              console.error(`[App] Error subiendo foto ${i + 1} para solicitud ${newSolicitudId}:`, imgErr);
+              showToast(`Aviso: No se pudo subir la foto ${i + 1}: ${imgErr.message || 'Error de conexión'}.`, 'error');
+            }
+          }
+
+          if (uploadCount > 0) {
+            showToast(`Solicitud enviada con ${uploadCount} evidencia(s) fotográfica(s). Pendiente de aprobación.`, 'success');
+          } else {
+            showToast('Solicitud enviada, pero falló la subida de imágenes.', 'info');
+          }
+        } else {
+          showToast('Solicitud de reporte enviada con éxito. Pendiente de aprobación.', 'success');
+        }
+
         setIsCreatingReport(false);
         setClickCoords(null);
+        setPublicPhotos([]);
+        setUploadStatusText('');
         setNewReport({
           type: 'damage_physical',
           subType: 'vivienda_colapsada',
@@ -585,6 +639,7 @@ export default function App() {
         showToast('Error al enviar la solicitud de reporte a la base de datos.', 'error');
       } finally {
         setIsSubmitting(false);
+        setUploadStatusText('');
       }
       return;
     }
@@ -751,6 +806,11 @@ export default function App() {
       if (!isLocalId) {
         // Eliminar de Supabase con cast numérico seguro para BIGINT
         const numericId = isNaN(Number(id)) ? id : Number(id);
+
+        // 1. Purgar primero las fotos del bucket emergencias-bucket
+        await purgeReporteImages(numericId);
+
+        // 2. Eliminar la fila de reportes_emergencia
         const { error } = await supabase
           .from('reportes_emergencia')
           .delete()
@@ -762,7 +822,7 @@ export default function App() {
       setReports(prev => prev.filter(r => r.id !== id));
       setSelectedReport(null);
       setIsEditingReport(false);
-      showToast('Reporte eliminado de Supabase y del mapa.', 'info');
+      showToast('Reporte e imágenes asociados eliminados de Supabase.', 'info');
     } catch (err: any) {
       console.error('Error eliminando reporte de Supabase:', err);
       // Fallback local
@@ -1355,28 +1415,38 @@ export default function App() {
     filteredReports.forEach((report) => {
 
       let isVisible = false;
-      let iconColorClass = 'bg-orange-500';
       let svgPath = '';
       let markerHtml = '';
 
+      // Determinar color de spot según el Estado de Atención:
+      // - Pendiente: Rojo (bg-red-600)
+      // - En Proceso: Naranja (bg-orange-500)
+      // - Atendido: Verde (bg-emerald-600)
+      const currentStatus = (report.status || 'Pendiente').toLowerCase().trim();
+      let iconColorClass = 'bg-red-600';
+
+      if (currentStatus === 'atendido') {
+        iconColorClass = 'bg-emerald-600';
+      } else if (currentStatus === 'en proceso' || currentStatus === 'en_proceso' || currentStatus === 'en-proceso') {
+        iconColorClass = 'bg-orange-500';
+      } else {
+        iconColorClass = 'bg-red-600';
+      }
+
       if (report.type === 'damage_physical' && visibleLayers.capa3) {
         isVisible = true;
-        iconColorClass = report.severity === 'critico' ? 'bg-red-700' : 'bg-orange-500';
         // Icono de Casa / Infraestructura
         svgPath = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
       } else if (report.type === 'damage_human' && visibleLayers.capa4) {
         isVisible = true;
-        iconColorClass = 'bg-red-600';
         // Icono de Cruz Médica / Humanos
         svgPath = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
       } else if (report.type === 'need_urgency' && visibleLayers.capa5) {
         isVisible = true;
-        iconColorClass = 'bg-amber-500';
         // Icono de Alerta / Exclamación
         svgPath = `<div class="text-white font-black text-sm select-none leading-none">!</div>`;
       } else if (report.type === 'shelter_hub' && visibleLayers.capa7) {
         isVisible = true;
-        iconColorClass = 'bg-emerald-500';
         // Icono de Paquete / Caja de acopio
         svgPath = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>`;
       }
@@ -1546,12 +1616,16 @@ export default function App() {
     <div className="flex flex-col md:flex-row h-screen w-screen bg-slate-50 overflow-hidden font-sans text-slate-800">
       
       {/* ================= BARRA LATERAL DE CONTROL E INFORMACIÓN ================= */}
-      <aside className={`w-full md:w-96 bg-white border-r border-slate-200/80 flex flex-col z-10 shadow-sm shrink-0 scrollbar-thin transition-all duration-300 ${
-        isSidebarOpenMobile ? 'h-[60vh]' : 'h-[80px] overflow-hidden'
-      } md:h-full md:overflow-y-auto`}>
+      <aside 
+        onTouchStart={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+        className={`w-full md:w-96 bg-white border-r border-slate-200/80 flex flex-col z-[1005] shadow-md shrink-0 scrollbar-thin transition-all duration-300 absolute md:static top-0 left-0 right-0 ${
+          isSidebarOpenMobile ? 'max-h-[82vh] h-auto shadow-2xl rounded-b-3xl overflow-y-auto' : 'h-[68px] overflow-hidden'
+        } md:h-full md:max-h-none md:rounded-none md:overflow-y-auto`}
+      >
         
         {/* CABECERA GUBERNAMENTAL / OPERATIVA */}
-        <div className="p-4 bg-slate-50/70 border-b border-slate-200/80 sticky top-0 z-20 backdrop-blur-md flex flex-col justify-center">
+        <div className="p-3 md:p-4 bg-slate-50/70 border-b border-slate-200/80 sticky top-0 z-20 backdrop-blur-md flex flex-col justify-center">
           <div className="flex items-center justify-between gap-2 w-full">
             <div className="flex items-start gap-2 flex-1 min-w-0">
               <div className="w-9 h-9 rounded-xl overflow-hidden shadow border border-slate-200 shrink-0 mt-0.5 bg-white flex items-center justify-center">
@@ -1635,7 +1709,7 @@ export default function App() {
           </div>
 
           {/* CONTROLADORES DE CAPAS GIS (DESPLEGABLE / MENU COLLAPSIBLE) */}
-          <div className="hidden md:block bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60 transition-all">
+          <div className="block bg-slate-50/40 rounded-2xl p-3.5 border border-slate-200/60 transition-all">
             <div 
               onClick={() => setIsLayerStackOpen(!isLayerStackOpen)}
               className="flex items-center justify-between cursor-pointer select-none group"
@@ -1899,8 +1973,8 @@ export default function App() {
               <div className="flex flex-wrap gap-1">
                 {[
                   { id: 'todos', label: 'Todos', count: reports.length, activeStyle: 'bg-slate-900 border-slate-900 text-white font-bold' },
-                  { id: 'Pendiente', label: '🟡 Pendiente', count: reports.filter(r => (r.status || 'Pendiente') === 'Pendiente').length, activeStyle: 'bg-amber-600 border-amber-600 text-white font-bold' },
-                  { id: 'En proceso', label: '🔵 En proceso', count: reports.filter(r => r.status === 'En proceso').length, activeStyle: 'bg-blue-600 border-blue-600 text-white font-bold' },
+                  { id: 'Pendiente', label: '🔴 Pendiente', count: reports.filter(r => (r.status || 'Pendiente') === 'Pendiente').length, activeStyle: 'bg-red-600 border-red-600 text-white font-bold' },
+                  { id: 'En proceso', label: '🟠 En proceso', count: reports.filter(r => r.status === 'En proceso').length, activeStyle: 'bg-orange-500 border-orange-500 text-white font-bold' },
                   { id: 'Atendido', label: '🟢 Atendido', count: reports.filter(r => r.status === 'Atendido').length, activeStyle: 'bg-emerald-600 border-emerald-600 text-white font-bold' }
                 ].map((item) => {
                   const isActive = statusFilter === item.id;
@@ -2058,8 +2132,8 @@ export default function App() {
                       <div className="flex items-center gap-1">
                         <span className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase border ${
                           report.status === 'Atendido' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                          report.status === 'En proceso' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                          'bg-amber-50 text-amber-700 border-amber-200'
+                          report.status === 'En proceso' ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                          'bg-red-50 text-red-700 border-red-200'
                         }`}>
                           {report.status || 'Pendiente'}
                         </span>
@@ -2238,12 +2312,12 @@ export default function App() {
       </aside>
 
       {/* ================= SECCIÓN DERECHA: MAPA LEAFLET Y FORMULARIOS DE ACCIÓN ================= */}
-      <main className="flex-1 relative flex flex-col h-0 md:h-full">
+      <main className="flex-1 relative flex flex-col h-full w-full pt-[68px] md:pt-0">
         
         {/* ENCABEZADO SUPERIOR DE ESTADO EN EL MAPA */}
-        <div className="absolute top-3 left-3 z-[1000] max-w-sm md:max-w-md bg-white/95 border border-slate-200 p-3 rounded-2xl shadow-lg backdrop-blur-md">
+        <div className="absolute top-20 md:top-3 left-3 z-[1000] max-w-[280px] sm:max-w-sm md:max-w-md bg-white/95 border border-slate-200 p-2.5 md:p-3 rounded-2xl shadow-lg backdrop-blur-md">
           <div className="flex items-start gap-2.5">
-            <div className="p-2 bg-yellow-100 text-yellow-800 rounded-xl border border-yellow-200/50 shadow-sm">
+            <div className="p-2 bg-yellow-100 text-yellow-800 rounded-xl border border-yellow-200/50 shadow-sm shrink-0">
               <Activity className="w-4 h-4 animate-bounce" />
             </div>
             <div>
@@ -2343,7 +2417,7 @@ export default function App() {
 
         {/* BANNER AVISO MODO EDITOR */}
         {activeRole === 'admin' && (
-          <div className="absolute top-3 right-16 z-[1000] bg-red-600 text-white font-bold text-[10px] md:text-xs px-3 py-2 rounded-xl shadow-lg border border-red-500 animate-pulse flex items-center gap-1.5">
+          <div className="absolute top-20 md:top-3 right-3 md:right-16 z-[1000] bg-red-600 text-white font-bold text-[10px] md:text-xs px-3 py-2 rounded-xl shadow-lg border border-red-500 animate-pulse flex items-center gap-1.5">
             <PlusCircle className="w-4 h-4" />
             <span>MODO COER: Haz clic en el mapa para colocar un marcador de impacto</span>
           </div>
@@ -2357,687 +2431,815 @@ export default function App() {
           style={{ height: '100%', minHeight: '500px' }}
         />
 
-        {/* ================= DETALLE DE REPORTE SELECCIONADO (SIDEBAR DE MAPA) ================= */}
+        {/* ================= DETALLE DE REPORTE SELECCIONADO (SIDEBAR / BOTTOM SHEET DE MAPA) ================= */}
         {selectedReport && (
-          <div className="absolute top-16 md:top-24 right-3 z-[1000] w-[340px] md:w-[380px] bg-white/95 border border-slate-200/80 rounded-3xl shadow-xl p-4 animate-slide-in backdrop-blur-md">
-            <div className="flex items-center justify-between border-b border-slate-200/85 pb-2.5 mb-3">
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase border ${
-                selectedReport.type === 'damage_physical' ? 'bg-orange-50 text-orange-700 border-orange-200/60' :
-                selectedReport.type === 'damage_human' ? 'bg-red-50 text-red-700 border-red-200/60' : 
-                selectedReport.type === 'shelter_hub' ? 'bg-emerald-50 text-emerald-700 border-emerald-200/60' : 'bg-amber-50 text-amber-700 border-amber-200/60'
-              }`}>
-                {selectedReport.type === 'damage_physical' ? '🧱 Capa 3: Daño Físico' :
-                 selectedReport.type === 'damage_human' ? '❤️ Capa 4: Daño Humano' : 
-                 selectedReport.type === 'shelter_hub' ? '📦 Capa 7: Centro de acopio' : '🚨 Capa 5: Necesidad y Urgencia'}
-              </span>
-              <button 
-                onClick={() => {
-                  setSelectedReport(null);
-                  setIsEditingReport(false);
-                }} 
-                className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+          <div 
+            className="fixed inset-0 z-[1100] md:absolute md:inset-auto md:top-24 md:right-3 bg-slate-900/40 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none flex items-end md:items-start justify-center md:justify-end p-0 sm:p-2 md:p-0"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setSelectedReport(null);
+                setIsEditingReport(false);
+              }
+            }}
+          >
+            <div className="w-full max-w-lg md:w-[380px] bg-white border border-slate-200/80 rounded-t-3xl md:rounded-3xl shadow-2xl md:shadow-xl p-4 animate-slide-in backdrop-blur-md max-h-[85vh] md:max-h-[80vh] overflow-y-auto scrollbar-thin flex flex-col">
+              {/* Barra indicadora visual para arrastrar en móvil */}
+              <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden shrink-0"></div>
 
-            {!isEditingReport ? (
-              // VISTA DE LECTURA (DISPONIBLE PARA AMBOS ROLES)
-              <div className="space-y-3.5">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 leading-snug">{selectedReport.title}</h3>
-                  <p className="text-slate-650 text-xs mt-1 leading-relaxed whitespace-pre-line">{selectedReport.description}</p>
-                </div>
+              <div className="flex items-center justify-between border-b border-slate-200/85 pb-2.5 mb-3 shrink-0">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase border ${
+                  selectedReport.type === 'damage_physical' ? 'bg-orange-50 text-orange-700 border-orange-200/60' :
+                  selectedReport.type === 'damage_human' ? 'bg-red-50 text-red-700 border-red-200/60' : 
+                  selectedReport.type === 'shelter_hub' ? 'bg-emerald-50 text-emerald-700 border-emerald-200/60' : 'bg-amber-50 text-amber-700 border-amber-200/60'
+                }`}>
+                  {selectedReport.type === 'damage_physical' ? '🧱 Capa 3: Daño Físico' :
+                   selectedReport.type === 'damage_human' ? '❤️ Capa 4: Daño Humano' : 
+                   selectedReport.type === 'shelter_hub' ? '📦 Capa 7: Centro de acopio' : '🚨 Capa 5: Necesidad y Urgencia'}
+                </span>
+                <button 
+                  onClick={() => {
+                    setSelectedReport(null);
+                    setIsEditingReport(false);
+                  }} 
+                  className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
 
-                <div className="grid grid-cols-2 gap-2.5 bg-slate-50 p-3 rounded-2xl border border-slate-200/50 text-[11px]">
-                  <div className="col-span-2 flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-200/80 shadow-2xs">
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-500 font-semibold text-[10px]">Estado de Atención:</span>
-                      <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded-full uppercase border flex items-center gap-1.5 ${
-                        selectedReport.status === 'Atendido' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                        selectedReport.status === 'En proceso' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                        'bg-amber-50 text-amber-700 border-amber-200'
-                      }`}>
-                        <span className={`w-2 h-2 rounded-full ${
-                          selectedReport.status === 'Atendido' ? 'bg-emerald-500 animate-pulse' :
-                          selectedReport.status === 'En proceso' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500 animate-pulse'
-                        }`}></span>
-                        {selectedReport.status || 'Pendiente'}
-                      </span>
-                    </div>
-                    {activeRole === 'admin' && (
-                      <button
-                        onClick={() => setIsEditingReport(true)}
-                        className="text-[10px] font-bold text-blue-600 hover:text-blue-800 underline cursor-pointer"
-                      >
-                        Editar Estado
-                      </button>
-                    )}
-                  </div>
-
+              {!isEditingReport ? (
+                // VISTA DE LECTURA (DISPONIBLE PARA AMBOS ROLES)
+                <div className="space-y-3.5 flex-1">
                   <div>
-                    <span className="text-slate-400 block font-medium">Severidad</span>
-                    <span className="font-bold capitalize flex items-center gap-1 text-slate-800">
-                      <span className={`w-2 h-2 rounded-full ${
-                        selectedReport.severity === 'critico' ? 'bg-red-500 animate-pulse' :
-                        selectedReport.severity === 'alto' ? 'bg-orange-500' :
-                        selectedReport.severity === 'medio' ? 'bg-amber-500' : 'bg-green-500'
-                      }`}></span>
-                      {selectedReport.severity}
-                    </span>
+                    <h3 className="text-sm font-bold text-slate-900 leading-snug">{selectedReport.title}</h3>
+                    <p className="text-slate-650 text-xs mt-1 leading-relaxed whitespace-pre-line">{selectedReport.description}</p>
                   </div>
-                  <div>
-                    <span className="text-slate-400 block font-medium">Subtipo</span>
-                    <span className="font-bold text-slate-700">
-                      {selectedReport.subType.replace('_', ' ').toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400 block font-medium">Registrado Por</span>
-                    <span className="font-bold text-slate-700">{selectedReport.createdBy}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400 block font-medium">Fecha/Hora Reporte</span>
-                    <span className="font-mono text-slate-500">
-                      {new Date(selectedReport.createdAt).toLocaleString('es-PE')}
-                    </span>
-                  </div>
-                  <div className="col-span-2 pt-1.5 border-t border-slate-200 mt-1">
-                    <span className="text-slate-400 block font-medium">Coordenadas Geográficas</span>
-                    <span className="font-mono text-slate-650">
-                      {selectedReport.lat.toFixed(5)}, {selectedReport.lng.toFixed(5)}
-                    </span>
-                  </div>
-                </div>
 
-                {/* GALERÍA DE EVIDENCIA FOTOGRÁFICA (COMPRIMIDA WEBP SUPABASE) */}
-                <ImageGallery
-                  reporteId={selectedReport.id}
-                  isAdmin={activeRole === 'admin'}
-                  onNotification={showToast}
-                />
-
-                <div className="flex gap-2 pt-1.5 border-t border-slate-200">
-                  <button
-                    onClick={() => handleFocusOnMap(selectedReport.lat, selectedReport.lng)}
-                    className="flex-1 py-2 bg-slate-900 hover:bg-slate-800 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-white shadow-sm transition-all cursor-pointer"
-                  >
-                    <MapPin className="w-3.5 h-3.5" />
-                    Centrar en Mapa
-                  </button>
-
-                  {activeRole === 'admin' && (
-                    <>
-                      <button
-                        onClick={() => setIsEditingReport(true)}
-                        className="px-3.5 py-2 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
-                        disabled={isSubmitting}
-                      >
-                        Editar
-                      </button>
-                      
-                      {isDeleteConfirming ? (
-                        <div className="flex items-center gap-1.5 animate-fade-in">
-                          <button
-                            onClick={() => handleDeleteReport(selectedReport.id)}
-                            disabled={isSubmitting}
-                            className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-xs font-bold rounded-xl text-white shadow-sm transition-all cursor-pointer"
-                          >
-                            {isSubmitting ? '...' : '¿Eliminar?'}
-                          </button>
-                          <button
-                            onClick={() => setIsDeleteConfirming(false)}
-                            disabled={isSubmitting}
-                            className="px-2.5 py-2 bg-slate-100 hover:bg-slate-200 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 transition-all cursor-pointer"
-                          >
-                            No
-                          </button>
-                        </div>
-                      ) : (
+                  <div className="grid grid-cols-2 gap-2.5 bg-slate-50 p-3 rounded-2xl border border-slate-200/50 text-[11px]">
+                    <div className="col-span-2 flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 font-semibold text-[10px]">Estado de Atención:</span>
+                        <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded-full uppercase border flex items-center gap-1.5 ${
+                          selectedReport.status === 'Atendido' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                          selectedReport.status === 'En proceso' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                          'bg-amber-50 text-amber-700 border-amber-200'
+                        }`}>
+                          <span className={`w-2 h-2 rounded-full ${
+                            selectedReport.status === 'Atendido' ? 'bg-emerald-500 animate-pulse' :
+                            selectedReport.status === 'En proceso' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500 animate-pulse'
+                          }`}></span>
+                          {selectedReport.status || 'Pendiente'}
+                        </span>
+                      </div>
+                      {activeRole === 'admin' && (
                         <button
-                          onClick={() => setIsDeleteConfirming(true)}
-                          disabled={isSubmitting}
-                          className="px-3.5 py-2 bg-red-50 hover:bg-red-100 border border-red-150 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-red-650 transition-all cursor-pointer"
-                          title="Eliminar Reporte de Supabase"
+                          onClick={() => setIsEditingReport(true)}
+                          className="text-[10px] font-bold text-blue-600 hover:text-blue-800 underline cursor-pointer"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          Editar Estado
                         </button>
                       )}
-                    </>
-                  )}
+                    </div>
+
+                    <div>
+                      <span className="text-slate-400 block font-medium">Severidad</span>
+                      <span className="font-bold capitalize flex items-center gap-1 text-slate-800">
+                        <span className={`w-2 h-2 rounded-full ${
+                          selectedReport.severity === 'critico' ? 'bg-red-500 animate-pulse' :
+                          selectedReport.severity === 'alto' ? 'bg-orange-500' :
+                          selectedReport.severity === 'medio' ? 'bg-amber-500' : 'bg-green-500'
+                        }`}></span>
+                        {selectedReport.severity}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-medium">Subtipo</span>
+                      <span className="font-bold text-slate-700">
+                        {selectedReport.subType.replace('_', ' ').toUpperCase()}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-medium">Registrado Por</span>
+                      <span className="font-bold text-slate-700">{selectedReport.createdBy}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-medium">Fecha/Hora Reporte</span>
+                      <span className="font-mono text-slate-500">
+                        {new Date(selectedReport.createdAt).toLocaleString('es-PE')}
+                      </span>
+                    </div>
+                    <div className="col-span-2 pt-1.5 border-t border-slate-200 mt-1">
+                      <span className="text-slate-400 block font-medium">Coordenadas Geográficas</span>
+                      <span className="font-mono text-slate-650">
+                        {selectedReport.lat.toFixed(5)}, {selectedReport.lng.toFixed(5)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* GALERÍA DE EVIDENCIA FOTOGRÁFICA (COMPRIMIDA WEBP SUPABASE) */}
+                  <ImageGallery
+                    reporteId={selectedReport.id}
+                    isAdmin={activeRole === 'admin'}
+                    onNotification={showToast}
+                  />
+
+                  {/* BARRA DE ACCIONES FIJA AL FINAL */}
+                  <div className="flex gap-2 pt-2 border-t border-slate-200 sticky bottom-0 bg-white pb-1 z-10">
+                    <button
+                      onClick={() => handleFocusOnMap(selectedReport.lat, selectedReport.lng)}
+                      className="flex-1 py-2.5 bg-slate-900 hover:bg-slate-800 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-white shadow-sm transition-all cursor-pointer"
+                    >
+                      <MapPin className="w-3.5 h-3.5" />
+                      Centrar en Mapa
+                    </button>
+
+                    {activeRole === 'admin' && (
+                      <>
+                        <button
+                          onClick={() => setIsEditingReport(true)}
+                          className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
+                          disabled={isSubmitting}
+                        >
+                          Editar
+                        </button>
+                        
+                        {isDeleteConfirming ? (
+                          <div className="flex items-center gap-1.5 animate-fade-in">
+                            <button
+                              onClick={() => handleDeleteReport(selectedReport.id)}
+                              disabled={isSubmitting}
+                              className="px-3.5 py-2.5 bg-red-600 hover:bg-red-700 text-xs font-bold rounded-xl text-white shadow-sm transition-all cursor-pointer"
+                            >
+                              {isSubmitting ? '...' : '¿Eliminar?'}
+                            </button>
+                            <button
+                              onClick={() => setIsDeleteConfirming(false)}
+                              disabled={isSubmitting}
+                              className="px-2.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 transition-all cursor-pointer"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setIsDeleteConfirming(true)}
+                            disabled={isSubmitting}
+                            className="px-3.5 py-2.5 bg-red-50 hover:bg-red-100 border border-red-150 text-xs font-semibold rounded-xl flex items-center justify-center gap-1 text-red-650 transition-all cursor-pointer"
+                            title="Eliminar Reporte de Supabase"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
+              ) : (
+                // FORMULARIO DE EDICIÓN (SÓLO PARA ADMINISTRADORES)
+                <form onSubmit={handleUpdateReport} className="space-y-3 flex-1">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Título del Reporte</label>
+                    <input
+                      type="text"
+                      value={selectedReport.title}
+                      onChange={(e) => setSelectedReport(prev => prev ? { ...prev, title: e.target.value } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                      maxLength={100}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                      <span>Estado de Atención (Gestión COER)</span>
+                      <span className="text-[9px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">Modo Admin</span>
+                    </label>
+                    <select
+                      value={selectedReport.status || 'Pendiente'}
+                      onChange={(e) => setSelectedReport(prev => prev ? { ...prev, status: e.target.value } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="Pendiente">🟡 Pendiente (Sin atender)</option>
+                      <option value="En proceso">🔵 En proceso (Brigada / Desplegada)</option>
+                      <option value="Atendido">🟢 Atendido (Situación resuelta)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Gravedad / Severidad</label>
+                    <select
+                      value={selectedReport.severity}
+                      onChange={(e) => setSelectedReport(prev => prev ? { ...prev, severity: e.target.value as SeverityLevel } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="bajo">Bajo (Precaución)</option>
+                      <option value="medio">Medio (Atención necesaria)</option>
+                      <option value="alto">Alto (Peligro estructural/social)</option>
+                      <option value="critico">Crítico (Colapso/Inmediato)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción de Daños o Necesidad</label>
+                    <textarea
+                      value={selectedReport.description}
+                      onChange={(e) => setSelectedReport(prev => prev ? { ...prev, description: e.target.value } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-20 resize-none transition-all"
+                      maxLength={1000}
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Reportado Por</label>
+                      <input
+                        type="text"
+                        value={selectedReport.createdBy}
+                        onChange={(e) => setSelectedReport(prev => prev ? { ...prev, createdBy: e.target.value } : null)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Ubicación (Lectura)</label>
+                      <div className="bg-slate-50 text-slate-500 p-2.5 text-[10px] font-mono rounded-xl border border-slate-200 truncate">
+                        {selectedReport.lat.toFixed(4)}, {selectedReport.lng.toFixed(4)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* GESTIÓN DE FOTOS EN MODO ADMINISTRADOR/EDICIÓN */}
+                  <ImageGallery
+                    reporteId={selectedReport.id}
+                    isAdmin={true}
+                    onNotification={showToast}
+                  />
+
+                  {/* BOTONES DE EDICIÓN FIJOS AL FINAL */}
+                  <div className="flex gap-2 pt-2 border-t border-slate-200 sticky bottom-0 bg-white pb-1 z-10">
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className={`flex-1 py-2.5 text-xs font-semibold rounded-xl text-white shadow-sm transition-all cursor-pointer ${
+                        isSubmitting
+                          ? 'bg-slate-500 cursor-not-allowed opacity-75'
+                          : 'bg-slate-900 hover:bg-slate-800'
+                      }`}
+                    >
+                      {isSubmitting ? 'Guardando...' : 'Guardar Cambios'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => setIsEditingReport(false)}
+                      className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ================= REGISTRO DE NUEVO REPORTE EN CALIENTE (MAP CLICK) ================= */}
+        {isCreatingReport && clickCoords && (
+          <div 
+            className="fixed inset-0 z-[1100] md:absolute md:inset-auto md:top-24 md:right-3 bg-slate-900/40 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none flex items-end md:items-start justify-center md:justify-end p-0 sm:p-2 md:p-0"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setIsCreatingReport(false);
+                setClickCoords(null);
+                setPublicPhotos([]);
+                setUploadStatusText('');
+              }
+            }}
+          >
+            <div className="w-full max-w-lg md:w-[380px] bg-white border border-slate-200/80 rounded-t-3xl md:rounded-3xl shadow-2xl md:shadow-xl p-4 animate-slide-in backdrop-blur-md max-h-[85vh] md:max-h-[80vh] overflow-y-auto scrollbar-thin flex flex-col">
+              {/* Barra indicadora visual para arrastrar en móvil */}
+              <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden shrink-0"></div>
+
+              <div className="flex items-center justify-between border-b border-slate-200/85 pb-2 mb-2.5 shrink-0">
+                <span className="text-xs font-bold text-slate-900 flex items-center gap-1">
+                  <Plus className="w-4 h-4 text-slate-600" />
+                  {activeRole === 'admin' ? 'Registrar Impacto de Campo (COER)' : 'Solicitar Registro de Reporte'}
+                </span>
+                <button 
+                  onClick={() => {
+                    setIsCreatingReport(false);
+                    setClickCoords(null);
+                    setPublicPhotos([]);
+                    setUploadStatusText('');
+                  }} 
+                  className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-            ) : (
-              // FORMULARIO DE EDICIÓN (SÓLO PARA ADMINISTRADORES)
-              <form onSubmit={handleUpdateReport} className="space-y-3">
+
+              <form onSubmit={handleSaveReport} className="space-y-3.5 flex-1">
+                
+                {/* Coordenadas capturadas */}
+                <div className="p-2.5 bg-slate-50 border border-slate-200/60 rounded-xl flex items-center justify-between text-xs font-mono">
+                  <span className="text-slate-400 font-medium font-sans">Ubicación de Impacto:</span>
+                  <span className="text-slate-800 font-bold font-mono">
+                    [{clickCoords.lat.toFixed(5)}, {clickCoords.lng.toFixed(5)}]
+                  </span>
+                </div>
+
+                {/* Selección de Capa / Categoría */}
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Título del Reporte</label>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Capa Temática de Emergencia</label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleCategoryChange('damage_physical')}
+                      className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
+                        newReport.type === 'damage_physical'
+                          ? 'bg-orange-50 border-orange-300 text-orange-700 shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
+                      }`}
+                    >
+                      🧱 Capa 3: Físico
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCategoryChange('damage_human')}
+                      className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
+                        newReport.type === 'damage_human'
+                          ? 'bg-red-50 border-red-300 text-red-700 shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
+                      }`}
+                    >
+                      ❤️ Capa 4: Humano
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCategoryChange('need_urgency')}
+                      className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
+                        newReport.type === 'need_urgency'
+                          ? 'bg-amber-50 border-amber-300 text-amber-700 shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
+                      }`}
+                    >
+                      🚨 Capa 5: Urgencia
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCategoryChange('shelter_hub')}
+                      className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
+                        newReport.type === 'shelter_hub'
+                          ? 'bg-emerald-50 border-emerald-300 text-emerald-700 shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
+                      }`}
+                    >
+                      🟢 Capa 7: Acopio
+                    </button>
+                  </div>
+                </div>
+
+                {/* Subtipo de reporte */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Subtipo Específico de Incidencia</label>
+                  <select
+                    value={newReport.subType}
+                    onChange={(e) => setNewReport(prev => ({ ...prev, subType: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                  >
+                    {SUB_TYPES_BY_CATEGORY[newReport.type].map((st) => (
+                      <option key={st.value} value={st.value}>
+                        {st.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Título */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Título / Incidencia Breve</label>
                   <input
                     type="text"
-                    value={selectedReport.title}
-                    onChange={(e) => setSelectedReport(prev => prev ? { ...prev, title: e.target.value } : null)}
+                    placeholder="Ej: Colapso de tapial en Jr. Lima"
+                    value={newReport.title}
+                    onChange={(e) => setNewReport(prev => ({ ...prev, title: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                    maxLength={100}
+                    required
+                  />
+                </div>
+
+                {/* Descripción */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción Detallada / Reporte de Daños</label>
+                  <textarea
+                    placeholder="Describa la afectación de forma clara para el envío de ayuda humanitaria..."
+                    value={newReport.description}
+                    onChange={(e) => setNewReport(prev => ({ ...prev, description: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-16 resize-none transition-all"
+                    maxLength={1000}
+                    required
+                  />
+                </div>
+
+                {/* Distrito y Provincia (Requerido para solicitudes de reporte) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Distrito</label>
+                    <input
+                      type="text"
+                      placeholder="Ej: Chupaca"
+                      value={newReport.distrito}
+                      onChange={(e) => setNewReport(prev => ({ ...prev, distrito: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Provincia</label>
+                    <input
+                      type="text"
+                      placeholder="Ej: Chupaca"
+                      value={newReport.provincia}
+                      onChange={(e) => setNewReport(prev => ({ ...prev, provincia: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {/* Severidad y Reportador */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Nivel de Gravedad</label>
+                    <select
+                      value={newReport.severity}
+                      onChange={(e) => setNewReport(prev => ({ ...prev, severity: e.target.value as SeverityLevel }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="bajo">Bajo (Precaución)</option>
+                      <option value="medio">Medio (Atención)</option>
+                      <option value="alto">Alto (Grave)</option>
+                      <option value="critico">Crítico (Emergencia)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">
+                      {activeRole === 'admin' ? 'Reportado Por' : 'Nombre del Solicitante'}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={activeRole === 'admin' ? 'Ej: COER Junín' : 'Su nombre / institución'}
+                      value={newReport.createdBy}
+                      onChange={(e) => setNewReport(prev => ({ ...prev, createdBy: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                    />
+                  </div>
+                </div>
+
+                {activeRole === 'admin' && (
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Estado de Atención Inicial</label>
+                    <select
+                      value={newReport.status || 'Pendiente'}
+                      onChange={(e) => setNewReport(prev => ({ ...prev, status: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="Pendiente">🟡 Pendiente</option>
+                      <option value="En proceso">🔵 En proceso</option>
+                      <option value="Atendido">🟢 Atendido</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* SECCIÓN DE EVIDENCIA FOTOGRÁFICA DE CAMPO (PÚBLICA Y ADMIN) */}
+                <div className="space-y-2 pt-1 border-t border-slate-200/80">
+                  <label className="block text-[10px] font-bold text-slate-700 flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Camera className="w-3.5 h-3.5 text-teal-600" />
+                      Evidencia Fotográfica de Campo
+                    </span>
+                    <span className="text-[9px] font-semibold text-slate-400">
+                      ({publicPhotos.length}/3 fotos)
+                    </span>
+                  </label>
+
+                  {/* Zona de Selección de Archivos */}
+                  {publicPhotos.length < 3 && (
+                    <label className="border-2 border-dashed border-slate-200 hover:border-teal-500 hover:bg-teal-50/40 rounded-2xl p-3 flex flex-col items-center justify-center cursor-pointer transition-all text-center group">
+                      <UploadCloud className="w-5 h-5 text-slate-400 group-hover:text-teal-600 group-hover:scale-110 transition-all mb-1" />
+                      <span className="text-xs font-semibold text-slate-700 group-hover:text-teal-700">
+                        Adjuntar fotos de evidencia
+                      </span>
+                      <span className="text-[9px] text-slate-400 mt-0.5">
+                        Toma una foto o selecciona de la galería (Máx. 3)
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={handleFileSelect}
+                        className="hidden"
+                        disabled={isSubmitting}
+                      />
+                    </label>
+                  )}
+
+                  {/* Previsualizaciones (Thumbnails) */}
+                  {publicPhotos.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      {publicPhotos.map((file, idx) => {
+                        const previewUrl = URL.createObjectURL(file);
+                        return (
+                          <div key={idx} className="relative group rounded-xl overflow-hidden border border-slate-200 aspect-square bg-slate-100 shadow-xs">
+                            <img
+                              src={previewUrl}
+                              alt={`Evidencia ${idx + 1}`}
+                              className="w-full h-full object-cover"
+                              onLoad={() => URL.revokeObjectURL(previewUrl)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleRemovePhoto(idx)}
+                              disabled={isSubmitting}
+                              className="absolute top-1 right-1 bg-slate-900/80 hover:bg-red-600 text-white p-1 rounded-full transition-all shadow-md cursor-pointer"
+                              title="Quitar imagen"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                            <div className="absolute bottom-0 inset-x-0 bg-slate-900/80 p-0.5 text-[8px] text-white font-mono text-center truncate">
+                              {(file.size / (1024 * 1024)).toFixed(1)} MB
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Indicador de carga de fotos */}
+                {isSubmitting && uploadStatusText && (
+                  <div className="p-2.5 bg-teal-50 border border-teal-200 rounded-xl flex items-center gap-2 text-xs font-semibold text-teal-800 animate-pulse">
+                    <Loader2 className="w-4 h-4 animate-spin text-teal-600 shrink-0" />
+                    <span>{uploadStatusText}</span>
+                  </div>
+                )}
+
+                {/* BOTONES FIJOS AL FINAL */}
+                <div className="flex gap-2 pt-2 border-t border-slate-200 sticky bottom-0 bg-white pb-1 z-10">
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className={`flex-1 py-2.5 text-xs font-semibold rounded-xl text-white shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                      isSubmitting
+                        ? 'bg-slate-700 cursor-not-allowed opacity-90'
+                        : 'bg-slate-900 hover:bg-slate-800'
+                    }`}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-teal-400" />
+                        <span>{uploadStatusText || 'Enviando...'}</span>
+                      </>
+                    ) : (
+                      <span>
+                        {activeRole === 'admin' ? 'Registrar Reporte' : 'Solicitar Registro del Reporte'}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => {
+                      setIsCreatingReport(false);
+                      setClickCoords(null);
+                      setPublicPhotos([]);
+                      setUploadStatusText('');
+                    }}
+                    className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ================= FORMULARIO DE REVISIÓN, EDICIÓN Y APROBACIÓN DE SOLICITUD (SÓLO ADMIN) ================= */}
+        {selectedSolicitud && isEditingSolicitud && isAdmin && (
+          <div 
+            className="fixed inset-0 z-[1100] md:absolute md:inset-auto md:top-24 md:right-3 bg-slate-900/40 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none flex items-end md:items-start justify-center md:justify-end p-0 sm:p-2 md:p-0"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setSelectedSolicitud(null);
+                setIsEditingSolicitud(false);
+              }
+            }}
+          >
+            <div className="w-full max-w-lg md:w-[380px] bg-white border border-slate-200/80 rounded-t-3xl md:rounded-3xl shadow-2xl md:shadow-xl p-4 animate-slide-in backdrop-blur-md max-h-[85vh] md:max-h-[80vh] overflow-y-auto scrollbar-thin flex flex-col">
+              {/* Barra indicadora visual para arrastrar en móvil */}
+              <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden shrink-0"></div>
+
+              <div className="flex items-center justify-between border-b border-amber-200 pb-2 mb-2.5 shrink-0">
+                <span className="text-xs font-bold text-amber-900 flex items-center gap-1">
+                  <Clock className="w-4 h-4 text-amber-600 animate-pulse" />
+                  Revisar Solicitud de Reporte
+                </span>
+                <button 
+                  onClick={() => {
+                    setSelectedSolicitud(null);
+                    setIsEditingSolicitud(false);
+                  }} 
+                  className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleApproveSolicitud} className="space-y-3 flex-1">
+                
+                {/* Coordenadas */}
+                <div className="grid grid-cols-2 gap-2 text-[10px] bg-amber-50/50 p-2.5 rounded-xl border border-amber-100">
+                  <div>
+                    <label className="block text-[9px] font-bold text-slate-500 mb-0.5">Latitud</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      value={selectedSolicitud.lat}
+                      onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, lat: parseFloat(e.target.value) || 0 } : null)}
+                      className="w-full bg-white border border-amber-200 rounded-lg p-1.5 text-xs text-slate-800 focus:border-amber-400 outline-none"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-bold text-slate-500 mb-0.5">Longitud</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      value={selectedSolicitud.lng}
+                      onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, lng: parseFloat(e.target.value) || 0 } : null)}
+                      className="w-full bg-white border border-amber-200 rounded-lg p-1.5 text-xs text-slate-800 focus:border-amber-400 outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {/* Título de la solicitud */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Título / Identificación del Lugar</label>
+                  <input
+                    type="text"
+                    value={selectedSolicitud.title}
+                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, title: e.target.value } : null)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
                     maxLength={100}
                     required
                   />
                 </div>
 
+                {/* Descripción */}
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>Estado de Atención (Gestión COER)</span>
-                    <span className="text-[9px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">Modo Admin</span>
-                  </label>
-                  <select
-                    value={selectedReport.status || 'Pendiente'}
-                    onChange={(e) => setSelectedReport(prev => prev ? { ...prev, status: e.target.value } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="Pendiente">🟡 Pendiente (Sin atender)</option>
-                    <option value="En proceso">🔵 En proceso (Brigada / Desplegada)</option>
-                    <option value="Atendido">🟢 Atendido (Situación resuelta)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Gravedad / Severidad</label>
-                  <select
-                    value={selectedReport.severity}
-                    onChange={(e) => setSelectedReport(prev => prev ? { ...prev, severity: e.target.value as SeverityLevel } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="bajo">Bajo (Precaución)</option>
-                    <option value="medio">Medio (Atención necesaria)</option>
-                    <option value="alto">Alto (Peligro estructural/social)</option>
-                    <option value="critico">Crítico (Colapso/Inmediato)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción de Daños o Necesidad</label>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción de Daños / Detallada</label>
                   <textarea
-                    value={selectedReport.description}
-                    onChange={(e) => setSelectedReport(prev => prev ? { ...prev, description: e.target.value } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-20 resize-none transition-all"
+                    value={selectedSolicitud.description}
+                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, description: e.target.value } : null)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-16 resize-none transition-all"
                     maxLength={1000}
                     required
                   />
                 </div>
 
+                {/* Capa Temática y Gravedad */}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Reportado Por</label>
-                    <input
-                      type="text"
-                      value={selectedReport.createdBy}
-                      onChange={(e) => setSelectedReport(prev => prev ? { ...prev, createdBy: e.target.value } : null)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                    />
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Capa Temática</label>
+                    <select
+                      value={selectedSolicitud.type}
+                      onChange={(e) => {
+                        const newType = e.target.value as ReportType;
+                        setSelectedSolicitud(prev => {
+                          if (!prev) return null;
+                          return {
+                            ...prev,
+                            type: newType,
+                            subType: SUB_TYPES_BY_CATEGORY[newType][0].value
+                          };
+                        });
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="damage_physical">🧱 Físico / Infraestructura</option>
+                      <option value="damage_human">❤️ Humano / Salud</option>
+                      <option value="need_urgency">🚨 Necesidad / Urgencia</option>
+                      <option value="shelter_hub">🟢 Centro de acopio</option>
+                    </select>
                   </div>
+
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Ubicación (Lectura)</label>
-                    <div className="bg-slate-50 text-slate-500 p-2.5 text-[10px] font-mono rounded-xl border border-slate-200 truncate">
-                      {selectedReport.lat.toFixed(4)}, {selectedReport.lng.toFixed(4)}
-                    </div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Nivel Gravedad</label>
+                    <select
+                      value={selectedSolicitud.severity}
+                      onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, severity: e.target.value as SeverityLevel } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                    >
+                      <option value="bajo">Bajo (Precaución)</option>
+                      <option value="medio">Medio (Atención)</option>
+                      <option value="alto">Alto (Grave)</option>
+                      <option value="critico">Crítico (Emergencia)</option>
+                    </select>
                   </div>
                 </div>
 
-                {/* GESTIÓN DE FOTOS EN MODO ADMINISTRADOR/EDICIÓN */}
+                {/* Subtipo de Emergencia */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Subtipo de Emergencia</label>
+                  <select
+                    value={selectedSolicitud.subType}
+                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, subType: e.target.value } : null)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                  >
+                    {SUB_TYPES_BY_CATEGORY[selectedSolicitud.type].map((st) => (
+                      <option key={st.value} value={st.value}>
+                        {st.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Reportador y Teléfono */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Reportado Por</label>
+                    <input
+                      type="text"
+                      value={selectedSolicitud.createdBy}
+                      onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, createdBy: e.target.value } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">Teléfono</label>
+                    <input
+                      type="text"
+                      value={selectedSolicitud.phone || ''}
+                      placeholder="Ej: 999888777"
+                      onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, phone: e.target.value } : null)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Estado de Atención */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Estado de Atención</label>
+                  <select
+                    value={selectedSolicitud.status || 'Pendiente'}
+                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, status: e.target.value } : null)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
+                  >
+                    <option value="Pendiente">Pendiente</option>
+                    <option value="En proceso">En proceso</option>
+                    <option value="Atendido">Atendido</option>
+                  </select>
+                </div>
+
+                {/* EVIDENCIA FOTOGRÁFICA DE LA SOLICITUD */}
                 <ImageGallery
-                  reporteId={selectedReport.id}
+                  solicitudId={selectedSolicitud.id}
                   isAdmin={true}
                   onNotification={showToast}
                 />
 
-                <div className="flex gap-2 pt-2 border-t border-slate-200">
+                {/* Botones de acción final: "Aprobar y Registrar" y "Denegar Solicitud" (FIJOS AL FINAL) */}
+                <div className="flex flex-col gap-2 pt-2 border-t border-slate-200 sticky bottom-0 bg-white pb-1 z-10">
                   <button
                     type="submit"
                     disabled={isSubmitting}
-                    className={`flex-1 py-2 text-xs font-semibold rounded-xl text-white shadow-sm transition-all cursor-pointer ${
+                    className={`w-full py-2.5 text-xs font-bold rounded-xl text-white shadow-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
                       isSubmitting
                         ? 'bg-slate-500 cursor-not-allowed opacity-75'
-                        : 'bg-slate-900 hover:bg-slate-800'
+                        : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-100'
                     }`}
                   >
-                    {isSubmitting ? 'Guardando...' : 'Guardar Cambios'}
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    {isSubmitting ? 'Procesando...' : 'Aprobar y Registrar'}
                   </button>
                   <button
                     type="button"
                     disabled={isSubmitting}
-                    onClick={() => setIsEditingReport(false)}
-                    className="px-3.5 py-2 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
+                    onClick={handleDenySolicitud}
+                    className={`w-full py-2.5 text-xs font-bold rounded-xl text-red-750 bg-red-50 hover:bg-red-100 border border-red-250 transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                      isSubmitting ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
                   >
-                    Cancelar
+                    <XCircle className="w-3.5 h-3.5" />
+                    Denegar Solicitud
                   </button>
                 </div>
               </form>
-            )}
-          </div>
-        )}
-
-        {/* ================= REGISTRO DE NUEVO REPORTE EN CALIENTE (MAP CLICK) ================= */}
-        {isCreatingReport && clickCoords && (
-          <div className="absolute top-16 md:top-24 right-3 z-[1000] w-[340px] md:w-[380px] bg-white/95 border border-slate-200/80 rounded-3xl shadow-xl p-4 animate-slide-in backdrop-blur-md max-h-[80vh] overflow-y-auto scrollbar-thin">
-            <div className="flex items-center justify-between border-b border-slate-200/85 pb-2 mb-2.5">
-              <span className="text-xs font-bold text-slate-900 flex items-center gap-1">
-                <Plus className="w-4 h-4 text-slate-600" />
-                {activeRole === 'admin' ? 'Registrar Impacto de Campo (COER)' : 'Solicitar Registro de Reporte'}
-              </span>
-              <button 
-                onClick={() => {
-                  setIsCreatingReport(false);
-                  setClickCoords(null);
-                }} 
-                className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
             </div>
-
-            <form onSubmit={handleSaveReport} className="space-y-3.5">
-              
-              {/* Coordenadas capturadas */}
-              <div className="p-2.5 bg-slate-50 border border-slate-200/60 rounded-xl flex items-center justify-between text-xs font-mono">
-                <span className="text-slate-400 font-medium font-sans">Ubicación de Impacto:</span>
-                <span className="text-slate-800 font-bold font-mono">
-                  [{clickCoords.lat.toFixed(5)}, {clickCoords.lng.toFixed(5)}]
-                </span>
-              </div>
-
-              {/* Selección de Capa / Categoría */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Capa Temática de Emergencia</label>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleCategoryChange('damage_physical')}
-                    className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
-                      newReport.type === 'damage_physical'
-                        ? 'bg-orange-50 border-orange-300 text-orange-700 shadow-sm'
-                        : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
-                    }`}
-                  >
-                    🧱 Capa 3: Físico
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleCategoryChange('damage_human')}
-                    className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
-                      newReport.type === 'damage_human'
-                        ? 'bg-red-50 border-red-300 text-red-700 shadow-sm'
-                        : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
-                    }`}
-                  >
-                    ❤️ Capa 4: Humano
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleCategoryChange('need_urgency')}
-                    className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
-                      newReport.type === 'need_urgency'
-                        ? 'bg-amber-50 border-amber-300 text-amber-700 shadow-sm'
-                        : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
-                    }`}
-                  >
-                    🚨 Capa 5: Urgencia
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleCategoryChange('shelter_hub')}
-                    className={`p-1.5 rounded-lg text-[10px] border font-bold text-center transition-all cursor-pointer ${
-                      newReport.type === 'shelter_hub'
-                        ? 'bg-emerald-50 border-emerald-300 text-emerald-700 shadow-sm'
-                        : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-850'
-                    }`}
-                  >
-                    🟢 Capa 7: Acopio
-                  </button>
-                </div>
-              </div>
-
-              {/* Subtipo de reporte */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Subtipo Específico de Incidencia</label>
-                <select
-                  value={newReport.subType}
-                  onChange={(e) => setNewReport(prev => ({ ...prev, subType: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                >
-                  {SUB_TYPES_BY_CATEGORY[newReport.type].map((st) => (
-                    <option key={st.value} value={st.value}>
-                      {st.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Título */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Título / Incidencia Breve</label>
-                <input
-                  type="text"
-                  placeholder="Ej: Colapso de tapial en Jr. Lima"
-                  value={newReport.title}
-                  onChange={(e) => setNewReport(prev => ({ ...prev, title: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                  maxLength={100}
-                  required
-                />
-              </div>
-
-              {/* Descripción */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción Detallada / Reporte de Daños</label>
-                <textarea
-                  placeholder="Describa la afectación de forma clara para el envío de ayuda humanitaria..."
-                  value={newReport.description}
-                  onChange={(e) => setNewReport(prev => ({ ...prev, description: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-16 resize-none transition-all"
-                  maxLength={1000}
-                  required
-                />
-              </div>
-
-              {/* Distrito y Provincia (Requerido para solicitudes de reporte) */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Distrito</label>
-                  <input
-                    type="text"
-                    placeholder="Ej: Chupaca"
-                    value={newReport.distrito}
-                    onChange={(e) => setNewReport(prev => ({ ...prev, distrito: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Provincia</label>
-                  <input
-                    type="text"
-                    placeholder="Ej: Chupaca"
-                    value={newReport.provincia}
-                    onChange={(e) => setNewReport(prev => ({ ...prev, provincia: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                    required
-                  />
-                </div>
-              </div>
-
-              {/* Severidad y Reportador */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Nivel de Gravedad</label>
-                  <select
-                    value={newReport.severity}
-                    onChange={(e) => setNewReport(prev => ({ ...prev, severity: e.target.value as SeverityLevel }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="bajo">Bajo (Precaución)</option>
-                    <option value="medio">Medio (Atención)</option>
-                    <option value="alto">Alto (Grave)</option>
-                    <option value="critico">Crítico (Emergencia)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">
-                    {activeRole === 'admin' ? 'Reportado Por' : 'Nombre del Solicitante'}
-                  </label>
-                  <input
-                    type="text"
-                    placeholder={activeRole === 'admin' ? 'Ej: COER Junín' : 'Su nombre / institución'}
-                    value={newReport.createdBy}
-                    onChange={(e) => setNewReport(prev => ({ ...prev, createdBy: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                  />
-                </div>
-              </div>
-
-              {activeRole === 'admin' && (
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-700 mb-1">Estado de Atención Inicial</label>
-                  <select
-                    value={newReport.status || 'Pendiente'}
-                    onChange={(e) => setNewReport(prev => ({ ...prev, status: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="Pendiente">🟡 Pendiente</option>
-                    <option value="En proceso">🔵 En proceso</option>
-                    <option value="Atendido">🟢 Atendido</option>
-                  </select>
-                </div>
-              )}
-
-              <div className="flex gap-2 pt-2 border-t border-slate-200">
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className={`flex-1 py-2.5 text-xs font-semibold rounded-xl text-white shadow-sm transition-all cursor-pointer ${
-                    isSubmitting
-                      ? 'bg-slate-500 cursor-not-allowed opacity-75'
-                      : 'bg-slate-900 hover:bg-slate-850'
-                  }`}
-                >
-                  {activeRole === 'admin' 
-                    ? (isSubmitting ? 'Guardando en Supabase...' : 'Registrar Reporte') 
-                    : (isSubmitting ? 'Enviando solicitud...' : 'Solicitar Registro del Reporte')}
-                </button>
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={() => {
-                    setIsCreatingReport(false);
-                    setClickCoords(null);
-                  }}
-                  className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-xs font-semibold rounded-xl text-slate-700 border border-slate-200 shadow-sm transition-all cursor-pointer"
-                >
-                  Cancelar
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* ================= FORMULARIO DE REVISIÓN, EDICIÓN Y APROBACIÓN DE SOLICITUD (SÓLO ADMIN) ================= */}
-        {selectedSolicitud && isEditingSolicitud && isAdmin && (
-          <div className="absolute top-16 md:top-24 right-3 z-[1000] w-[340px] md:w-[380px] bg-white/95 border border-slate-200/80 rounded-3xl shadow-xl p-4 animate-slide-in backdrop-blur-md max-h-[80vh] overflow-y-auto scrollbar-thin">
-            <div className="flex items-center justify-between border-b border-amber-200 pb-2 mb-2.5">
-              <span className="text-xs font-bold text-amber-900 flex items-center gap-1">
-                <Clock className="w-4 h-4 text-amber-600 animate-pulse" />
-                Revisar Solicitud de Reporte
-              </span>
-              <button 
-                onClick={() => {
-                  setSelectedSolicitud(null);
-                  setIsEditingSolicitud(false);
-                }} 
-                className="text-slate-400 hover:text-slate-700 p-1 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleApproveSolicitud} className="space-y-3">
-              
-              {/* Coordenadas */}
-              <div className="grid grid-cols-2 gap-2 text-[10px] bg-amber-50/50 p-2.5 rounded-xl border border-amber-100">
-                <div>
-                  <label className="block text-[9px] font-bold text-slate-500 mb-0.5">Latitud</label>
-                  <input
-                    type="number"
-                    step="0.000001"
-                    value={selectedSolicitud.lat}
-                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, lat: parseFloat(e.target.value) || 0 } : null)}
-                    className="w-full bg-white border border-amber-200 rounded-lg p-1.5 text-xs text-slate-800 focus:border-amber-400 outline-none"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-[9px] font-bold text-slate-500 mb-0.5">Longitud</label>
-                  <input
-                    type="number"
-                    step="0.000001"
-                    value={selectedSolicitud.lng}
-                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, lng: parseFloat(e.target.value) || 0 } : null)}
-                    className="w-full bg-white border border-amber-200 rounded-lg p-1.5 text-xs text-slate-800 focus:border-amber-400 outline-none"
-                    required
-                  />
-                </div>
-              </div>
-
-              {/* Título de la solicitud */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Título / Identificación del Lugar</label>
-                <input
-                  type="text"
-                  value={selectedSolicitud.title}
-                  onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, title: e.target.value } : null)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                  maxLength={100}
-                  required
-                />
-              </div>
-
-              {/* Descripción */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Descripción de Daños / Detallada</label>
-                <textarea
-                  value={selectedSolicitud.description}
-                  onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, description: e.target.value } : null)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none h-16 resize-none transition-all"
-                  maxLength={1000}
-                  required
-                />
-              </div>
-
-              {/* Capa Temática y Gravedad */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Capa Temática</label>
-                  <select
-                    value={selectedSolicitud.type}
-                    onChange={(e) => {
-                      const newType = e.target.value as ReportType;
-                      setSelectedSolicitud(prev => {
-                        if (!prev) return null;
-                        return {
-                          ...prev,
-                          type: newType,
-                          subType: SUB_TYPES_BY_CATEGORY[newType][0].value
-                        };
-                      });
-                    }}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="damage_physical">🧱 Físico / Infraestructura</option>
-                    <option value="damage_human">❤️ Humano / Salud</option>
-                    <option value="need_urgency">🚨 Necesidad / Urgencia</option>
-                    <option value="shelter_hub">🟢 Centro de acopio</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Nivel Gravedad</label>
-                  <select
-                    value={selectedSolicitud.severity}
-                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, severity: e.target.value as SeverityLevel } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                  >
-                    <option value="bajo">Bajo (Precaución)</option>
-                    <option value="medio">Medio (Atención)</option>
-                    <option value="alto">Alto (Grave)</option>
-                    <option value="critico">Crítico (Emergencia)</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Subtipo de Emergencia */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Subtipo de Emergencia</label>
-                <select
-                  value={selectedSolicitud.subType}
-                  onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, subType: e.target.value } : null)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                >
-                  {SUB_TYPES_BY_CATEGORY[selectedSolicitud.type].map((st) => (
-                    <option key={st.value} value={st.value}>
-                      {st.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Reportador y Teléfono */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Reportado Por</label>
-                  <input
-                    type="text"
-                    value={selectedSolicitud.createdBy}
-                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, createdBy: e.target.value } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 mb-1">Teléfono</label>
-                  <input
-                    type="text"
-                    value={selectedSolicitud.phone || ''}
-                    placeholder="Ej: 999888777"
-                    onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, phone: e.target.value } : null)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all"
-                  />
-                </div>
-              </div>
-
-              {/* Estado de Atención */}
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 mb-1">Estado de Atención</label>
-                <select
-                  value={selectedSolicitud.status || 'Pendiente'}
-                  onChange={(e) => setSelectedSolicitud(prev => prev ? { ...prev, status: e.target.value } : null)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 outline-none transition-all cursor-pointer"
-                >
-                  <option value="Pendiente">Pendiente</option>
-                  <option value="En proceso">En proceso</option>
-                  <option value="Atendido">Atendido</option>
-                </select>
-              </div>
-
-              {/* EVIDENCIA FOTOGRÁFICA DE LA SOLICITUD */}
-              <ImageGallery
-                solicitudId={selectedSolicitud.id}
-                isAdmin={true}
-                onNotification={showToast}
-              />
-
-              {/* Botones de acción final: "Aprobar y Registrar" y "Denegar Solicitud" */}
-              <div className="flex flex-col gap-1.5 pt-2 border-t border-slate-200">
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className={`w-full py-2 text-xs font-bold rounded-xl text-white shadow-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
-                    isSubmitting
-                      ? 'bg-slate-500 cursor-not-allowed opacity-75'
-                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-100'
-                  }`}
-                >
-                  <CheckCircle className="w-3.5 h-3.5" />
-                  {isSubmitting ? 'Procesando...' : 'Aprobar y Registrar'}
-                </button>
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={handleDenySolicitud}
-                  className={`w-full py-2 text-xs font-bold rounded-xl text-red-750 bg-red-50 hover:bg-red-100 border border-red-250 transition-all cursor-pointer flex items-center justify-center gap-1 ${
-                    isSubmitting ? 'opacity-50 cursor-not-allowed' : ''
-                  }`}
-                >
-                  <XCircle className="w-3.5 h-3.5" />
-                  Denegar Solicitud
-                </button>
-              </div>
-            </form>
           </div>
         )}
 
